@@ -1538,6 +1538,22 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
         unassignedCount++;
       });
 
+      // Tag the matching creativePerf rows so the table can show DETACHED next to Active/Paused.
+      // Deliberately does NOT touch any count: a detached creative's state really is 'enabled', so
+      // excluding it from Active would make the table's totals disagree with the KPI tiles again.
+      // The tag says "still enabled, but no longer part of this campaign".
+      var unassignedById = {};
+      (b2.unassigned || []).forEach(function(r) {
+        if (r.creative_id != null) unassignedById[String(r.creative_id)] = r.unassigned_date || true;
+      });
+      (result.creativePerf || []).forEach(function(cp) {
+        var u = unassignedById[String(cp.creative_id)];
+        if (u) {
+          cp.is_unassigned = true;
+          cp.unassigned_date = (u === true) ? null : u;
+        }
+      });
+
       freshStatusLog.sort(function(a, b) { return (b.date || '').localeCompare(a.date || ''); });
       result.statusLog = freshStatusLog;
       Logger.log('statusLog: ' + (freshStatusLog.length - unassignedCount) + ' paused + ' +

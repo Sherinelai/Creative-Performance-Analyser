@@ -737,6 +737,7 @@ function loadDummy(type){
   // A metric-less queued creative, mirroring what the server appends for creatives stuck in the
   // throttle queue (never served → no analytics row at all). Present in the demo so the render
   // smoke test exercises every path with all-null metrics.
+  perfs.push({creative_id:9998,external_id:'demo9998x',competing_group:'phone-banner',ad_format:'phone-banner',status:'active',created_date:'2026-05-01',is_unassigned:true,unassigned_date:'2026-07-23',spend:1200,revenue:1500,roas:1.25,rpi:2.5,iti:0.00005,ipm:0.05,installs:120,sow_pct:2.5,variance:'moderate',perf_class:null,flags:[]});
   perfs.push({creative_id:9999,external_id:'demo9999x',competing_group:'phone-portrait-vast-30s',
     ad_format:'phone-portrait-vast-30s',status:'active',created_date:'2026-07-20',
     lifecycle_state:'queuing',is_queuing:true,is_metricless:true,spend:0,revenue:0,
@@ -2607,6 +2608,10 @@ function renderMergedTable(){
       var cDays=c.created_date?Math.floor((now-new Date(c.created_date))/864e5):null;
       var cFreshCell=cDays===null?'&mdash;':cDays<=30?'<span style="color:var(--gn)">'+cDays+'d</span>':cDays<=60?'<span style="color:var(--am)">'+cDays+'d</span>':'<span style="color:var(--rd)">'+cDays+'d</span>';
       var cst=c.status==='active'?'<span class="tag tag-g">Active</span>':'<span class="tag tag-r">Paused</span>';
+      // Detached from this campaign. The creative itself is usually still 'enabled', which is why it
+      // still reads Active above — this tag is the only thing that says it left the campaign.
+      // Counts are deliberately untouched (see the server-side note in Code.js).
+      if(c.is_unassigned)cst+=' <span class="tag tag-a" title="Unassigned from this campaign'+(c.unassigned_date?' on '+c.unassigned_date:'')+'">Detached</span>';
       var cs=((c.spend||0)/gSpend*100).toFixed(1);
       var cBar=cs+'%';
       var cRpi=c.rpi!=null?'$'+c.rpi.toFixed(2):'&mdash;',cRoas=c.roas!=null?(c.roas*100).toFixed(2)+'%':'&mdash;';
