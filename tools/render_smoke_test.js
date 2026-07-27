@@ -118,5 +118,35 @@ for (const type of ['cpr', 'cpa']) {
   }
 }
 
+// The overview pass: what the page renders BEFORE the performance query lands. Nothing that reads
+// creativePerf may throw when it is empty, and the perf-dependent modules must be replaced by the
+// pending card rather than drawing an empty chart.
+errors.length = 0;
+try {
+  vm.runInContext(`
+    loadDummy('cpr');
+    R.partial = true;
+    R.creativePerf = [];
+    R.dailyFormatMetrics = [];
+    R.dailyCreativeMetrics = [];
+    R.typeBreakdown = [];
+    R.campaignPerf = null;
+    R.totalSpend = 0;
+    R.avgMetric = null;
+    onData(R);
+    if (typeof perfPendingCard() !== 'string' || perfPendingCard().indexOf('Still querying') < 0)
+      throw new Error('pending card did not render its waiting message');
+    _perfError = 'simulated perf failure';
+    if (perfPendingCard().indexOf('unavailable') < 0)
+      throw new Error('pending card did not render its failure message');
+    _perfError = null;
+  `, ctx);
+  if (errors.length) throw new Error(errors.join('\n'));
+  console.log('PASS  render chain on the overview pass (perf still pending)');
+} catch (e) {
+  failed = true;
+  console.error(`FAIL  render chain on the overview pass:\n${e.stack || e}\n`);
+}
+
 if (!failed) console.log('render smoke test passed');
 process.exit(failed ? 1 : 0);

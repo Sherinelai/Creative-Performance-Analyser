@@ -582,7 +582,68 @@ function analyze(){
   document.getElementById('dashboard').style.display='none';
   document.getElementById('previewCard').style.display='none';
   document.getElementById('emptyState').style.display='none';
-  google.script.run.withSuccessHandler(onData).withFailureHandler(onError).fetchCreativeData(v,st,lb,f);
+  _perfError=null;
+  var token=++_loadToken;
+  // TWO PASSES, not one. The performance query is the slow half of the load — 40s on a small
+  // campaign, 86s on a big one over 30 days — and everything else answers in ~8s. Asking for the
+  // overview first puts the campaign, the pipeline states, the recent changes and the creative list
+  // on screen while the numbers are still in flight, and if the numbers never arrive the user is
+  // left with a useful page instead of an error.
+  google.script.run
+    .withSuccessHandler(function(d){ onOverview(d,v,st,lb,f,token); })
+    .withFailureHandler(onError)
+    .fetchCampaignOverview(v,st,lb,f);
+}
+
+var _loadToken=0, _perfError=null;
+
+/**
+ * Phase 1 landed. Paint it, then ask for the numbers — sequentially on purpose: firing both at once
+ * makes the perf query compete with the other twelve for the connection, which is exactly how it
+ * lost the race and came back empty before.
+ */
+function onOverview(d,v,st,lb,f,token){
+  if(token!==_loadToken)return;      // a newer search has already been started
+  onData(d);
+  if(!d||d.error)return;
+  google.script.run
+    .withSuccessHandler(function(full){
+      if(token!==_loadToken)return;
+      // A phase-2 error replaces the pending card only — the overview stays on screen.
+      if(!full||full.error){_perfError=(full&&full.error)||'Unknown error';refreshPerfPending();return;}
+      onData(full);
+    })
+    .withFailureHandler(function(err){
+      if(token!==_loadToken)return;
+      _perfError=(err&&err.message)||String(err);refreshPerfPending();
+    })
+    .fetchCreativeData(v,st,lb,f);
+}
+
+/**
+ * What stands in for the perf-dependent modules while the query runs, or after it fails. Never a
+ * zero: the overview genuinely does not know what the spend was.
+ */
+function perfPendingCard(){
+  var msg=_perfError
+    ? '<b style="color:var(--rd)">Performance data unavailable.</b> '+_perfError+
+      ' Everything above came from the faster queries and is complete.'
+    : '<b>Still querying performance data…</b> Spend, revenue, '+
+      metricLabel(primaryMetricKey(R&&R.campType))+', the format charts and the recommendations '+
+      'appear here when it lands — 1&ndash;2 minutes on a large campaign over 30 days.'+
+      '<div style="color:var(--tx3);font-size:var(--f6);margin-top:4px">The creative list below is '+
+      'every creative assigned to the campaign; it narrows to those with activity in the window once '+
+      'performance data arrives.</div>';
+  return '<div class="module" id="perfPending" style="margin-top:10px">'+
+    '<div style="display:flex;gap:10px;align-items:center;padding:14px">'+
+    (_perfError?'':'<div class="spinner" style="width:16px;height:16px;margin:0;flex:none"></div>')+
+    '<div style="font-size:var(--f5);color:var(--tx2);line-height:1.6">'+msg+'</div></div></div>';
+}
+
+/** Swap the pending card in place, so a perf failure does not wipe the rest of the page. */
+function refreshPerfPending(){
+  var el=document.getElementById('perfPending');
+  if(el)el.outerHTML=perfPendingCard();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1049,16 +1110,25 @@ function renderOverview(){
   } else h+='<div style="font-size:var(--f5);color:var(--tx3)">No recent changes.</div>';
   h+='</div>';
 
-  /* ── Combined chart module (Format Spend 1/4 + Revenue over time 3/4) ── */
-  h+=renderCombinedChartModule();
+  /* ── Everything below needs the performance query ────────────────────────────
+     Both chart modules are built from creativePerf and the daily queries, so on the overview pass
+     they would draw an empty canvas. The table stays — it lists the creatives and their lifecycle
+     states, and every metric cell already falls back to an em dash. */
+  if(R.partial){
+    h+=perfPendingCard();
+  } else {
+    /* ── Combined chart module (Format Spend 1/4 + Revenue over time 3/4) ── */
+    h+=renderCombinedChartModule();
 
-  /* ── Breakdown charts ── */
-  h+=renderBreakdownCharts();
+    /* ── Breakdown charts ── */
+    h+=renderBreakdownCharts();
+  }
 
   /* ── Main merged table ── */
   h+='<div id="tableSection">'+buildTableSection()+'</div>';
-  // Recommendations section (inline, not in a separate tab)
-  if(R.recommendations&&R.recommendations.length>0){
+  // Recommendations section (inline, not in a separate tab). Withheld on the overview pass: every
+  // recommendation is an argument about spend or the primary metric, neither of which is in yet.
+  if(!R.partial&&R.recommendations&&R.recommendations.length>0){
     h+='<div class="module" style="margin-top:10px"><div class="mod-h"><h3>Recommendations</h3><span class="badge badge-b">'+R.recommendations.length+'</span></div>';
     R.recommendations.forEach(function(r){h+='<div class="rec '+(r.level||'info')+'"><div class="rec-title">'+(r.title||'')+'</div>'+(r.body||r.text||'')+'</div>';});
     h+='</div>';

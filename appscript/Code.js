@@ -511,9 +511,15 @@ function runSQL(sql) {
 // Creates slugs sequentially (each needs auth), then runs
 // all queries simultaneously via UrlFetchApp.fetchAll()
 // ═══════════════════════════════════════════════════════════
-function runSQLParallel(sqlMap) {
+function runSQLParallel(sqlMap, failedOut) {
   // sqlMap: { key1: sqlString, key2: sqlString, ... }
   // Returns: { key1: rows, key2: rows, ... }
+  //
+  // failedOut (optional array): every key that did NOT return rows because something went wrong is
+  // pushed onto it. Without this a failure is indistinguishable from "no data" — the callers that
+  // don't pass it keep the old degrade-to-[] behaviour, but anything summing several queries into
+  // one number MUST pass it, or a failed part silently understates the total.
+  failedOut = failedOut || [];
   var token = getAccessToken();
   var BASE = LOOKER_CONFIG.BASE_URL + '/api/4.0';
   var authHeader = { 'Authorization': 'Bearer ' + token };
@@ -531,8 +537,8 @@ function runSQLParallel(sqlMap) {
       });
       var q = JSON.parse(r.getContentText());
       if (q.slug) slugs[key] = q.slug;
-      else Logger.log('Slug creation failed for ' + key + ': ' + r.getContentText().substring(0,100));
-    } catch(e) { Logger.log('Slug error for ' + key + ': ' + e.message); }
+      else { failedOut.push(key); Logger.log('Slug creation failed for ' + key + ': ' + r.getContentText().substring(0,100)); }
+    } catch(e) { failedOut.push(key); Logger.log('Slug error for ' + key + ': ' + e.message); }
   });
 
   // Step 2: Fire all run/json requests in parallel
@@ -555,16 +561,40 @@ function runSQLParallel(sqlMap) {
       var body = responses[i].getContentText();
       if (responses[i].getResponseCode() !== 200) {
         Logger.log('Parallel query ' + key + ' HTTP ' + responses[i].getResponseCode());
+        failedOut.push(key);
         results[key] = [];
       } else {
-        results[key] = JSON.parse(body);
+        var parsed = JSON.parse(body);
+        // Looker answers a failed SQL Runner query with HTTP 200 and an error payload, not rows:
+        // either {looker_error|message|errors} or [{looker_error: '...'}]. Parsing that as data is
+        // how a query timeout became "0 rows" instead of "this query failed".
+        var errText = lookerErrorIn_(parsed);
+        if (errText) {
+          Logger.log('Parallel query ' + key + ' returned a Looker error: ' + errText.substring(0,200));
+          failedOut.push(key);
+          results[key] = [];
+        } else {
+          results[key] = parsed;
+        }
       }
     } catch(e) {
       Logger.log('Parallel parse error for ' + key + ': ' + e.message);
+      failedOut.push(key);
       results[key] = [];
     }
   });
   return results;
+}
+
+/** The error text in a Looker SQL Runner response, or '' when the response really is rows. */
+function lookerErrorIn_(parsed) {
+  if (!parsed) return '';
+  var probe = Array.isArray(parsed) ? (parsed.length === 1 ? parsed[0] : null) : parsed;
+  if (!probe || typeof probe !== 'object') return '';
+  var e = probe.looker_error || probe.error || probe.message;
+  if (typeof e === 'string' && e) return e;
+  if (probe.errors) { try { return JSON.stringify(probe.errors); } catch(_) { return 'query error'; } }
+  return '';
 }
 
 
@@ -739,80 +769,6 @@ function fetchCampaignSearch(input) {
 // Kept for backward compatibility / manual testing only.
 // MCO detection here may differ from the builder versions.
 // ═══════════════════════════════════════════════════════════
-function fetchCreativeLevelPerf(campaignId, lookbackDays) {
-  var pdt = getPDT();
-  var dtStart = "DATE_ADD('day', -" + (lookbackDays + DATA_BAKE_DAYS) + ", CAST(CAST(DATE_TRUNC('DAY', CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP))";
-  var dtEnd   = "DATE_ADD('day', " + lookbackDays + ", DATE_ADD('day', -" + (lookbackDays + DATA_BAKE_DAYS) + ", CAST(CAST(DATE_TRUNC('DAY', CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP)))";
-  var sql = [
-    "WITH pinpoint__creatives_simple AS (",
-    "  SELECT c.id, c.display_name, c.state, c.customer_id, c.created_at,",
-    "    c.creative_type_id, c.is_interactive, c.inventory_format",
-    "  FROM pinpoint.public.creatives c",
-    "),",
-    "pinpoint__campaigns AS (",
-    "  SELECT c.id, c.current_optimization_state, c.vt_cap",
-    "  FROM pinpoint.public.campaigns c",
-    ")",
-    "SELECT",
-    "  revenue_summary.campaign_id,",
-    "  revenue_summary.campaign_name,",
-    "  cstudio__creative_format.creative_format_derived AS creative_format,",
-    "  revenue_summary.customer_id,",
-    "  revenue_summary.dest_app_id AS app_id,",
-    "  revenue_summary.dest_app_name AS app_name,",
-    "  revenue_summary.creative_id,",
-    "  CASE WHEN revenue_summary.is_interactive = 'true' THEN 'Interactive'",
-    "       WHEN revenue_summary.is_interactive = 'false' THEN 'Not Interactive'",
-    "       ELSE 'N/A' END AS is_interactive,",
-    "  revenue_summary.is_video_creative AS is_video,",
-    "  pinpoint__creatives_simple.state AS creative_state,",
-    "  revenue_summary.campaign_type,",
-    "  pinpoint__campaigns.current_optimization_state AS optimization_state,",
-    "  pinpoint__creatives_simple.inventory_format AS competing_group,",
-    "  revenue_summary.target_event_name,",
-    "  CAST(revenue_summary.target_event_id AS VARCHAR) AS target_event_id,",
-    "  revenue_summary.campaign_goal_1,",
-    "  revenue_summary.campaign_goal_2,",
-    // Core metrics
-    "  COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) AS revenue_d7,",
-    "  COALESCE(SUM(revenue_summary.revenue_micros_d1 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.installs_d1), 0), 0) AS rpi_d1,",
-    "  CAST(COALESCE(SUM(revenue_summary.installs_d7), 0) AS DOUBLE) / NULLIF(COALESCE(SUM(revenue_summary.impressions), 0), 0) AS iti,",
-    "  COALESCE(SUM(revenue_summary.installs_d7), 0) / CAST(NULLIF(COALESCE(SUM(revenue_summary.impressions), 0), 0) AS DOUBLE) * 1000 AS ipm,",
-    "  COALESCE(SUM(revenue_summary.coalesced_customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0), 0) AS roas_d7,",
-    "  COALESCE(SUM(revenue_summary.coalesced_customer_revenue_micros_d1 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d1 / CAST(1e6 AS DOUBLE)), 0), 0) AS roas_d1,",
-    "  COALESCE(SUM(revenue_summary.spend_micros / CAST(1e6 AS DOUBLE)), 0) AS spend,",
-    "  COALESCE(SUM(revenue_summary.installs_d1), 0) AS installs,",
-    // RPA (Revenue per first target event D7)
-    "  COALESCE(SUM(revenue_summary.target_events_first_d7), 0) AS target_events_d7,",
-    "  COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.target_events_first_d7), 0), 0) AS rpa_d7,",
-    // ROAS CI
-    "  CASE WHEN COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) < 0.0005 THEN NULL",
-    "       ELSE 1.96 * SQRT(COALESCE(SUM(revenue_summary.incremental_squared_capped_customer_revenue_d7), 0)) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) END AS roas_ci_margin,",
-    "  CASE WHEN COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) < 0.0005 THEN NULL",
-    "       ELSE COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) - 1.96 * SQRT(COALESCE(SUM(revenue_summary.incremental_squared_capped_customer_revenue_d7), 0)) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) END AS roas_d7_lower_ci,",
-    "  CASE WHEN COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) < 0.0005 THEN NULL",
-    "       ELSE COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) + 1.96 * SQRT(COALESCE(SUM(revenue_summary.incremental_squared_capped_customer_revenue_d7), 0)) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) END AS roas_d7_upper_ci,",
-    // RPA CI (Poisson-based)
-    "  CASE WHEN COALESCE(SUM(revenue_summary.target_events_first_d7), 0) < 5 THEN NULL",
-    "       ELSE COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / (COALESCE(SUM(revenue_summary.target_events_first_d7), 0) + 1.96 * SQRT(COALESCE(SUM(revenue_summary.target_events_first_d7), 0))) END AS rpa_d7_lower_ci,",
-    "  CASE WHEN COALESCE(SUM(revenue_summary.target_events_first_d7), 0) < 5 THEN NULL",
-    "       ELSE COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / (COALESCE(SUM(revenue_summary.target_events_first_d7), 0) - 1.96 * SQRT(COALESCE(SUM(revenue_summary.target_events_first_d7), 0))) END AS rpa_d7_upper_ci,",
-    "  CASE WHEN COALESCE(SUM(revenue_summary.target_events_first_d7), 0) < 5 THEN NULL",
-    "       ELSE (COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / (COALESCE(SUM(revenue_summary.target_events_first_d7), 0) - 1.96 * SQRT(COALESCE(SUM(revenue_summary.target_events_first_d7), 0))) - COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.target_events_first_d7), 0), 0)) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.target_events_first_d7), 0), 0), 0) END AS rpa_ci_delta",
-    "FROM analytics.daily_attr_event_d7 AS revenue_summary",
-    "LEFT JOIN pinpoint__campaigns ON revenue_summary.campaign_id = pinpoint__campaigns.id",
-    "LEFT JOIN pinpoint__creatives_simple ON revenue_summary.creative_id = pinpoint__creatives_simple.id",
-    "LEFT JOIN " + pdt + " AS cstudio__creative_format ON pinpoint__creatives_simple.id = cstudio__creative_format.creative_id",
-    "WHERE (from_iso8601_timestamp(revenue_summary.dt)) >= " + dtStart,
-    "  AND (from_iso8601_timestamp(revenue_summary.dt)) < " + dtEnd,
-    "  AND revenue_summary.campaign_id = " + campaignId,
-    "  AND revenue_summary.is_uncredited <> 'true'",
-    "GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17",
-    "ORDER BY 18 DESC",
-    "LIMIT 500",
-  ].join('\n');
-  return runSQL(sql);
-}
 
 
 // ═══════════════════════════════════════════════════════════
@@ -1062,10 +1018,22 @@ function fetchTypeBreakdown(campaignId, lookbackDays) {
 // ═══════════════════════════════════════════════════════════
 // MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════
-function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
+/**
+ * The overview pass: everything the dashboard can show WITHOUT the slow performance query.
+ *
+ * The client calls this first and paints campaign summary, pipeline states, recent changes and the
+ * creative list from it in ~8s, then calls fetchCreativeData for the numbers. On a campaign whose
+ * perf query cannot finish, the user is left with a useful page instead of an error.
+ */
+function fetchCampaignOverview(searchInput, searchType, lookbackDays, dashFilters) {
+  return fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters, { overviewOnly: true });
+}
+
+function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters, opts) {
   var _logStart = new Date().getTime();
   lookbackDays = lookbackDays || DEFAULT_LOOKBACK_DAYS;
   dashFilters = dashFilters || {};
+  opts = opts || {};
   try {
     if (!searchInput) return { error: 'Please provide an App ID, Campaign ID, or App name.' };
 
@@ -1102,13 +1070,16 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
     // did) made it compete for the connection and lose. So: its own wave, no contention, and one
     // retry before we trust an empty answer.
     var t1 = new Date().getTime();
-    var perfSQL = buildCreativeLevelPerfSQL(campaignId, lookbackDays);
-    var perfData = (runSQLParallel({ perf: perfSQL }).perf) || [];
-    if (!perfData.length) {
-      Logger.log('Perf returned 0 rows — retrying once (it is slow and can time out)');
-      perfData = (runSQLParallel({ perf: perfSQL }).perf) || [];
+    var perfData = [], perfFailed = [];
+    if (opts.overviewOnly) {
+      Logger.log('Overview pass: skipping perf and the daily queries — the client asks for them next');
+    } else {
+      var perfRes = fetchCreativePerf_(campaignId, lookbackDays);
+      perfData = perfRes.rows;
+      perfFailed = perfRes.failed;
+      Logger.log('Perf: ' + perfData.length + ' rows from ' + perfRes.chunks + ' chunk(s) in ' +
+                 Math.round((new Date().getTime()-t1)/1000) + 's');
     }
-    Logger.log('Perf: ' + perfData.length + ' rows in ' + Math.round((new Date().getTime()-t1)/1000) + 's');
 
     // WAVE 2 — everything else, all in parallel. None of these depend on wave 1's rows; they are
     // in a second wave only so wave 1 runs uncontended.
@@ -1116,10 +1087,7 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
     var allSQLs = {
       inventory: buildCreativeInventorySQL(campaignId),
       config:    buildCampaignConfigSQL(appId),
-      dailyFmt:  buildDailyFormatMetricsSQL(campaignId, lookbackDays),
-      typeBreak: buildTypeBreakdownSQL(campaignId, lookbackDays),
       meta:      buildCampaignMetaSQL(campaignId),
-      dailyCr:   buildDailyCreativeMetricsSQL(campaignId, lookbackDays),
       targetEvt: buildTargetEventSQL(campaignId),
       pauseLog:  buildPauseLogSQL(campaignId, lookbackDays),
       unassigned:buildUnassignedSQL(campaignId, lookbackDays),
@@ -1130,6 +1098,15 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
       optimizing:buildOptimizingSQL(campaignId) || 'SELECT 1 AS _skip'
       // campBasic/campCohort REMOVED — computed from merged[] for perfect consistency + speed
     };
+    // The three chart queries are the slow ones after perf (dailyFmt 28s, dailyCr 26s on 77022) and
+    // every one of them only feeds a metric chart, so the overview pass leaves them out: it paints
+    // the campaign summary, the pipeline states and the recent changes in ~8s instead of ~30s.
+    // Both consumers read them as (rows || []).map(...), so absent means empty, not broken.
+    if (!opts.overviewOnly) {
+      allSQLs.dailyFmt  = buildDailyFormatMetricsSQL(campaignId, lookbackDays);
+      allSQLs.dailyCr   = buildDailyCreativeMetricsSQL(campaignId, lookbackDays);
+      allSQLs.typeBreak = buildTypeBreakdownSQL(campaignId, lookbackDays);
+    }
     var all = runSQLParallel(allSQLs);
     Logger.log('Other queries done in ' + Math.round((new Date().getTime()-t2)/1000) + 's');
     all.perf = perfData;
@@ -1140,10 +1117,20 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
     // failed or timed out, not that the campaign was idle — the two read different tables, but a
     // campaign with creatives in the window and no performance data at all is anomalous enough to
     // report rather than draw.
-    if (!perfData.length && (all.inventory || []).length > 0) {
+    //
+    // A chunk that never came back is worse than none of them: the sums would silently cover fewer
+    // days than the window claims, so every number would read low with nothing on screen saying so.
+    if (perfFailed.length) {
+      return { error: 'Part of the ' + lookbackDays + '-day performance window did not come back for ' +
+        'campaign ' + campaignId + ' (' + perfFailed.join('; ') + '), even after a retry. The numbers ' +
+        'would read low, so nothing is shown rather than something wrong. Try again, or pick a shorter ' +
+        'lookback window.' };
+    }
+    if (!opts.overviewOnly && !perfData.length && (all.inventory || []).length > 0) {
       return { error: 'The creative performance query returned no rows for campaign ' + campaignId +
         ', although the campaign has ' + all.inventory.length + ' creatives in this window. That query ' +
-        'takes 40-90s and can time out. Please try again; if it keeps failing, shorten the lookback window.' };
+        'takes 40-90s and can time out. Please try again; if it keeps failing, pick a shorter lookback ' +
+        'window (7 or 14 days).' };
     }
 
     var inventory = b1.inventory || [];
@@ -1900,9 +1887,13 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
       Logger.log('Enhanced recs generated: mco=' + mcoEnabled + ' exploring=' + exploringCnt + ' queuing=' + queuingCnt);
     } catch(e) { Logger.log('Enhanced recs failed: ' + e.message); }
 
+    // The client reads this to decide whether to say "still querying" instead of drawing a zero.
+    result.partial = !!opts.overviewOnly;
+    result.lookbackDays = lookbackDays;
+
     var _logDuration = Math.round((new Date().getTime() - _logStart) / 1000);
     var ci = result.campaignInfo || {};
-    logUsage('analyze', {
+    logUsage(opts.overviewOnly ? 'overview' : 'analyze', {
       campaignId: campaignId,
       appId: appId || ci.dest_app_id || '',
       campaignType: ci.campaign_type || campaignType || '',
@@ -1936,10 +1927,188 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
 // SQL BUILDER HELPERS (return SQL string without running)
 // Used by runSQLParallel for batch execution
 // ═══════════════════════════════════════════════════════════
-function buildCreativeLevelPerfSQL(campaignId, lookbackDays) {
+// ─── The perf query's time budget ────────────────────────────────────────────────────────────────
+// UrlFetchApp's own timeout is NOT configurable — there is no option to pass, and a request that
+// outlives it comes back as a failure no matter how much of the 6-minute execution budget is left.
+// Measured: this query answers in 40s on campaign 41535 and 86s on 73853 (4,029,065 fact rows in a
+// 30-day window); the second one never reached the dashboard. Rewriting the SQL does not help — an
+// aggregate-first version measured 227s, and the bare scan grouped by creative_id alone is 32s, so
+// the scan IS the floor.
+//
+// So the way to buy more time is to make each HTTP request smaller: split the lookback into date
+// chunks that each fit comfortably under the ceiling, fire them together (fetchAll), and add the
+// pieces back up in JS. N chunks give roughly N times the effective budget for the same wall clock.
+var PERF_CHUNK_TARGET_DAYS = 10;   // one chunk of a very large campaign measures ~30s
+var PERF_CHUNK_MAX = 6;            // each chunk costs a sequential slug creation, so cap the count
+var PERF_CHUNK_MIN_LOOKBACK = 15;  // 7- and 14-day windows already fit in one request
+
+/** The lookback split into windows, or null to run it as a single query. */
+function perfChunkWindows_(lookbackDays) {
+  if (lookbackDays < PERF_CHUNK_MIN_LOOKBACK) return null;
+  var n = Math.min(Math.ceil(lookbackDays / PERF_CHUNK_TARGET_DAYS), PERF_CHUNK_MAX);
+  var len = Math.ceil(lookbackDays / n), wins = [];
+  for (var s = 0; s < lookbackDays; s += len) {
+    wins.push({ from: s, to: Math.min(s + len, lookbackDays) });
+  }
+  return wins.length > 1 ? wins : null;
+}
+
+/**
+ * The creative-performance rows for the whole window.
+ *
+ * Returns { rows, failed: [labels], chunks }. `failed` is non-empty when part of the window did not
+ * come back — the caller MUST NOT draw the rows in that case, because sums missing a chunk are
+ * understated, which is worse than an error.
+ */
+function fetchCreativePerf_(campaignId, lookbackDays) {
+  var wins = perfChunkWindows_(lookbackDays);
+
+  if (!wins) {
+    var sql = buildCreativeLevelPerfSQL(campaignId, lookbackDays);
+    var failed = [];
+    var rows = (runSQLParallel({ perf: sql }, failed).perf) || [];
+    if (failed.length || !rows.length) {
+      Logger.log('Perf failed or returned 0 rows — retrying once');
+      failed = [];
+      rows = (runSQLParallel({ perf: sql }, failed).perf) || [];
+    }
+    return { rows: rows, failed: failed.length ? ['the whole window'] : [], chunks: 1 };
+  }
+
+  var sqls = {}, labels = {};
+  wins.forEach(function(w, i) {
+    var k = 'perf' + i;
+    sqls[k] = buildCreativeLevelPerfSQL(campaignId, lookbackDays, w);
+    labels[k] = 'day ' + w.from + '-' + w.to + ' of ' + lookbackDays;
+  });
+  var failed = [];
+  var res = runSQLParallel(sqls, failed);
+  if (failed.length) {
+    // Retry only the pieces that failed; the ones that came back are already paid for.
+    Logger.log('Perf chunks failed: ' + failed.join(', ') + ' — retrying just those');
+    var retry = {}, failed2 = [];
+    failed.forEach(function(k) { retry[k] = sqls[k]; });
+    var again = runSQLParallel(retry, failed2);
+    Object.keys(again).forEach(function(k) { res[k] = again[k]; });
+    failed = failed2;
+  }
+  var parts = Object.keys(sqls).map(function(k) { return res[k] || []; });
+  var rows = combinePerfChunks_(parts);
+  Logger.log('Perf: ' + wins.length + ' chunks -> ' + rows.length + ' creatives' +
+             (failed.length ? ' (MISSING ' + failed.length + ')' : ''));
+  return { rows: rows, failed: failed.map(function(k) { return labels[k]; }), chunks: wins.length };
+}
+
+/**
+ * Add the chunks back into one row per creative and recompute every ratio from the totals.
+ *
+ * Ratios are not additive, which is why the chunk queries also select the raw sums — averaging the
+ * chunks' ROAS would weight a quiet day the same as a heavy one. Every formula below mirrors the
+ * SQL's exactly, over the summed inputs, so a chunked read and a single-query read of the same
+ * window agree. Grouping by creative_id also collapses the duplicate rows the 17-column GROUP BY
+ * produces when a campaign-level column (target_event_name, campaign_goal_*, ...) changes
+ * mid-window — 467 rows for 241 creatives on campaign 73853.
+ */
+function combinePerfChunks_(parts) {
+  var sumKeys = Object.keys(PERF_SUM_COLUMNS);
+  var byId = {}, order = [];
+  (parts || []).forEach(function(rows) {
+    (rows || []).forEach(function(r) {
+      if (r == null || r.creative_id == null || String(r.creative_id) === '') return;
+      var k = String(r.creative_id), acc = byId[k];
+      if (!acc) {
+        acc = byId[k] = {};
+        order.push(k);
+        PERF_DIM_COLUMNS.forEach(function(d) { acc[d] = r[d]; });
+        sumKeys.forEach(function(s) { acc[s] = 0; });
+      }
+      // A dimension can be null in one chunk and set in another (a creative renamed mid-window,
+      // a format PDT row added later) — first non-null wins.
+      PERF_DIM_COLUMNS.forEach(function(d) { if (acc[d] == null && r[d] != null) acc[d] = r[d]; });
+      sumKeys.forEach(function(s) { acc[s] += (Number(r[s]) || 0); });
+    });
+  });
+  return order.map(function(k) { return perfRowFromSums_(byId[k]); })
+              .sort(function(a, b) { return (b.revenue_d7 || 0) - (a.revenue_d7 || 0); });
+}
+
+/** One perf row rebuilt from summed inputs — the JS twin of the perf query's outer SELECT. */
+function perfRowFromSums_(a) {
+  var row = {};
+  PERF_DIM_COLUMNS.forEach(function(d) { row[d] = a[d]; });
+  var div = function(x, y) { return y ? x / y : null; };   // the SQL's NULLIF(denominator, 0)
+  var evt = a.s_evt_d7, iti = div(a.s_inst_d7, a.s_impr), rpa = div(a.s_rev_d7, evt);
+  var roasPoint = div(a.s_cust_d7, a.s_rev_d7);
+  var margin = (a.s_cust_d7 < 0.0005) ? null : div(1.96 * Math.sqrt(a.s_isq), a.s_rev_d7);
+  var rpaHi = (evt < 5) ? null : div(a.s_rev_d7, evt - 1.96 * Math.sqrt(evt));
+  row.revenue_d7        = a.s_rev_d7;
+  row.rpi_d1            = div(a.s_rev_d1, a.s_inst_d1);
+  row.iti               = iti;
+  row.ipm               = (iti == null) ? null : iti * 1000;
+  row.roas_d7           = div(a.s_coal_d7, a.s_rev_d7);
+  row.roas_d1           = div(a.s_coal_d1, a.s_rev_d1);
+  row.spend             = a.s_spend;
+  row.installs          = a.s_inst_d1;
+  row.target_events_d7  = evt;
+  row.rpa_d7            = rpa;
+  row.roas_ci_margin    = margin;
+  row.roas_d7_lower_ci  = (margin == null || roasPoint == null) ? null : roasPoint - margin;
+  row.roas_d7_upper_ci  = (margin == null || roasPoint == null) ? null : roasPoint + margin;
+  row.rpa_d7_lower_ci   = (evt < 5) ? null : div(a.s_rev_d7, evt + 1.96 * Math.sqrt(evt));
+  row.rpa_d7_upper_ci   = rpaHi;
+  row.rpa_ci_delta      = (rpaHi == null || rpa == null) ? null : div(rpaHi - rpa, rpa);
+  return row;
+}
+
+/**
+ * The raw sums a perf row is built from: output alias -> the expression to SUM.
+ *
+ * Single-sourced because two things must agree exactly — the SQL that selects them (only when the
+ * query is chunked) and combinePerfChunks_, which adds them up across chunks and recomputes every
+ * ratio from the totals. The expression's column name must come FIRST; the builder prefixes it
+ * with the table alias.
+ */
+var PERF_SUM_COLUMNS = {
+  s_rev_d7:  'revenue_micros_d7 / CAST(1e6 AS DOUBLE)',
+  s_rev_d1:  'revenue_micros_d1 / CAST(1e6 AS DOUBLE)',
+  s_cust_d7: 'customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)',
+  s_coal_d7: 'coalesced_customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)',
+  s_coal_d1: 'coalesced_customer_revenue_micros_d1 / CAST(1e6 AS DOUBLE)',
+  s_spend:   'spend_micros / CAST(1e6 AS DOUBLE)',
+  s_inst_d1: 'installs_d1',
+  s_inst_d7: 'installs_d7',
+  s_impr:    'impressions',
+  s_evt_d7:  'target_events_first_d7',
+  s_isq:     'incremental_squared_capped_customer_revenue_d7'
+};
+
+/** The 17 dimension columns of a perf row, in select order — what GROUP BY 1..17 groups on. */
+var PERF_DIM_COLUMNS = [
+  'campaign_id','campaign_name','creative_format','customer_id','app_id','app_name','creative_id',
+  'is_interactive','is_video','creative_state','campaign_type','optimization_state',
+  'competing_group','target_event_name','target_event_id','campaign_goal_1','campaign_goal_2'
+];
+
+/**
+ * @param win optional {from, to} day offsets INSIDE the lookback window (0 = its first day). When
+ *            given, the query covers only those days and also selects the raw sums so the pieces
+ *            can be added back together in JS. When absent the SQL is byte-identical to the
+ *            long-standing version — a measured-good query, do not reshape it.
+ */
+function buildCreativeLevelPerfSQL(campaignId, lookbackDays, win) {
   var pdt = getPDT();
+  var MIDNIGHT = "CAST(CAST(DATE_TRUNC('DAY', CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP)";
   var dtStart = "DATE_ADD('day', -" + (lookbackDays + DATA_BAKE_DAYS) + ", CAST(CAST(DATE_TRUNC('DAY', CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP))";
   var dtEnd   = "DATE_ADD('day', " + lookbackDays + ", DATE_ADD('day', -" + (lookbackDays + DATA_BAKE_DAYS) + ", CAST(CAST(DATE_TRUNC('DAY', CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP)))";
+  var sumCols = '';
+  if (win) {
+    var base = -(lookbackDays + DATA_BAKE_DAYS);
+    dtStart = "DATE_ADD('day', " + (base + win.from) + ", " + MIDNIGHT + ")";
+    dtEnd   = "DATE_ADD('day', " + (base + win.to)   + ", " + MIDNIGHT + ")";
+    sumCols = ',\n' + Object.keys(PERF_SUM_COLUMNS).map(function(k) {
+      return "  COALESCE(SUM(revenue_summary." + PERF_SUM_COLUMNS[k] + "), 0) AS " + k;
+    }).join(',\n');
+  }
   return [
     "WITH pinpoint__creatives_simple AS (",
     "  SELECT c.id, c.state, c.inventory_format FROM pinpoint.public.creatives c",
@@ -1988,7 +2157,7 @@ function buildCreativeLevelPerfSQL(campaignId, lookbackDays) {
     "  CASE WHEN COALESCE(SUM(revenue_summary.target_events_first_d7), 0) < 5 THEN NULL",
     "       ELSE COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / (COALESCE(SUM(revenue_summary.target_events_first_d7), 0) - 1.96 * SQRT(COALESCE(SUM(revenue_summary.target_events_first_d7), 0))) END AS rpa_d7_upper_ci,",
     "  CASE WHEN COALESCE(SUM(revenue_summary.target_events_first_d7), 0) < 5 THEN NULL",
-    "       ELSE (COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / (COALESCE(SUM(revenue_summary.target_events_first_d7), 0) - 1.96 * SQRT(COALESCE(SUM(revenue_summary.target_events_first_d7), 0))) - COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.target_events_first_d7), 0), 0)) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.target_events_first_d7), 0), 0), 0) END AS rpa_ci_delta",
+    "       ELSE (COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / (COALESCE(SUM(revenue_summary.target_events_first_d7), 0) - 1.96 * SQRT(COALESCE(SUM(revenue_summary.target_events_first_d7), 0))) - COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.target_events_first_d7), 0), 0)) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.target_events_first_d7), 0), 0), 0) END AS rpa_ci_delta" + sumCols,
     "FROM analytics.daily_attr_event_d7 AS revenue_summary",
     "LEFT JOIN pinpoint__campaigns ON revenue_summary.campaign_id = pinpoint__campaigns.id",
     "LEFT JOIN pinpoint__creatives_simple ON revenue_summary.creative_id = pinpoint__creatives_simple.id",

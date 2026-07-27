@@ -45,6 +45,9 @@ sandbox.__ROWS = ROWS;
 vm.runInContext(`
   getPDT = function(){ return ${JSON.stringify(CREATIVE_FORMAT_PDT)}; };
   getQueuePDT = function(){ return ${JSON.stringify(QUEUE_PDT)}; };
+  // The saved dump is a whole-window perf read, so drive the unchunked path here. Chunk combining
+  // is verified straight against Trino instead — it needs the s_* sum columns this dump lacks.
+  perfChunkWindows_ = function(){ return null; };
   runSQL = function(sql){
     if (/SHOW TABLES/i.test(sql)) return [];
     if (/campaigns c /i.test(sql) && /campaign_id/i.test(sql)) return __ROWS.search || [];
@@ -59,8 +62,11 @@ vm.runInContext(`
   fetchCreativeDailyMetrics = function(){ return __ROWS.dailyCr || []; };
 `, ctx);
 
+// `node tools/run_pipeline.js <cid> <days> overview` runs the fast pass the client asks for first.
+const overviewOnly = process.argv[4] === 'overview';
 const r = vm.runInContext(
-  `fetchCreativeData(${JSON.stringify(String(campaignId))}, 'campaign', ${lookbackDays}, {})`, ctx);
+  `fetchCreativeData(${JSON.stringify(String(campaignId))}, 'campaign', ${lookbackDays}, {}, ` +
+  `${JSON.stringify({ overviewOnly })})`, ctx);
 
 if (r && r.error) { console.error('ERROR from fetchCreativeData: ' + r.error); process.exit(1); }
 
