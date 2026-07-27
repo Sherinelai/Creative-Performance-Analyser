@@ -57,6 +57,7 @@ const wanted = {
   dailyCr: `buildDailyCreativeMetricsSQL(${campaignId}, ${lookbackDays})`,
   impInst: `buildImpressionInstallSQL(${campaignId}, ${lookbackDays})`,
   pauseLog: `buildPauseLogSQL(${campaignId}, ${lookbackDays})`,
+  unassigned: `buildUnassignedSQL(${campaignId}, ${lookbackDays})`,
 };
 
 const out = {};

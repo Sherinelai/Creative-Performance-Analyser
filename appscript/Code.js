@@ -1068,6 +1068,7 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
       dailyCr:   buildDailyCreativeMetricsSQL(campaignId, lookbackDays),
       targetEvt: buildTargetEventSQL(campaignId),
       pauseLog:  buildPauseLogSQL(campaignId, lookbackDays),
+      unassigned:buildUnassignedSQL(campaignId, lookbackDays),
       impInst:   buildImpressionInstallSQL(campaignId, lookbackDays),
       queuing:   buildQueueingSQL(campaignId)   || 'SELECT 1 AS _skip',
       exploring: buildExploringSQL(campaignId)  || 'SELECT 1 AS _skip',
@@ -1519,10 +1520,28 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
           changed_by:  pl.pause_method || cp.pause_method || 'unknown'
         });
       });
+      // Unassigned (detached) creatives are the second kind of change in this log. They are NOT
+      // pauses — the creative is usually still 'enabled', it just no longer belongs to this
+      // campaign — so they carry change_type 'unassigned' and get no MCO diagnosis (the AI
+      // explains MCO's own decisions; a person detaching a creative needs no explanation).
+      var unassignedCount = 0;
+      (b2.unassigned || []).forEach(function(r) {
+        if (r.creative_id == null) return;
+        freshStatusLog.push({
+          date:             r.unassigned_date || null,
+          creative_id:      String(r.creative_id),
+          change_type:      'unassigned',
+          changed_by:       r.unassign_method || 'unknown',
+          creative_state:   r.creative_state || null,
+          inventory_format: r.inventory_format || null
+        });
+        unassignedCount++;
+      });
+
       freshStatusLog.sort(function(a, b) { return (b.date || '').localeCompare(a.date || ''); });
       result.statusLog = freshStatusLog;
-      Logger.log('statusLog: ' + freshStatusLog.length + ' paused creatives (' + plRows.length +
-                 ' enriched from pauseLog)');
+      Logger.log('statusLog: ' + (freshStatusLog.length - unassignedCount) + ' paused + ' +
+                 unassignedCount + ' unassigned (' + plRows.length + ' enriched from pauseLog)');
 
       // Patch external_id, paused_date, latest_enabled_date into creativePerf
       if (result.creativePerf && Object.keys(plMap).length > 0) {
@@ -2141,6 +2160,53 @@ function buildOptimizingSQL(campaignId) {
       "LIMIT 500",
     ].join('\n');
   } catch(e) { Logger.log('buildOptimizingSQL failed: ' + e.message); return null; }
+}
+
+/**
+ * Creatives UNASSIGNED (detached) from this campaign, with when and by whom.
+ *
+ * Source: pinpoint.public.elephant_changes — the audit log. A detach is a DELETE on
+ * campaigns_creatives with new_values NULL; campaign_id and creative_id live inside the
+ * old_values JSON. Per creative we take the LATEST such event and resolve the actor.
+ *
+ * Note detaching does NOT pause the creative: all three rows on campaign 64417 came back with
+ * state 'enabled', so a detached creative still counts as Active in the KPI tile. That is exactly
+ * why it belongs in the changes list.
+ *
+ * PERFORMANCE: the campaign filter must go INSIDE the CTE, on the raw JSON string
+ * (json_extract_scalar(...) = '<id>', no CAST), together with a logged_at bound. elephant_changes
+ * is large: filtering only in the outer query timed out at 120s, this form returns in ~17s.
+ */
+function buildUnassignedSQL(campaignId, lookbackDays) {
+  var days = (lookbackDays || DEFAULT_LOOKBACK_DAYS) + DATA_BAKE_DAYS;
+  return [
+    "WITH ec AS (",
+    "  SELECT e.logged_at, e.source, e.user_id,",
+    "         CAST(json_extract_scalar(e.old_values, '$.creative_id') AS INT) AS creative_id",
+    "  FROM pinpoint.public.elephant_changes e",
+    "  WHERE e.table_name = 'campaigns_creatives'",
+    "    AND e.operation = 'delete'",
+    "    AND e.new_values IS NULL",
+    "    AND json_extract_scalar(e.old_values, '$.campaign_id') = '" + campaignId + "'",
+    "    AND e.logged_at >= DATE_ADD('day', -" + days + ", CURRENT_DATE)",
+    "),",
+    "latest AS (SELECT creative_id, MAX(logged_at) AS latest_unassigned_date FROM ec GROUP BY 1)",
+    "SELECT DISTINCT",
+    "  ec.creative_id AS creative_id,",
+    "  c.external_id AS external_id,",
+    "  c.state AS creative_state,",
+    "  c.inventory_format AS inventory_format,",
+    "  DATE_FORMAT(l.latest_unassigned_date, '%Y-%m-%d') AS unassigned_date,",
+    "  CASE WHEN CONCAT(u.first_name, ' ', u.last_name) IS NOT NULL",
+    "       THEN CONCAT(CONCAT(u.first_name, ' ', u.last_name), ' in ', ec.source)",
+    "       ELSE ec.source END AS unassign_method",
+    "FROM ec",
+    "JOIN latest l ON l.creative_id = ec.creative_id AND l.latest_unassigned_date = ec.logged_at",
+    "LEFT JOIN pinpoint.public.creatives c ON c.id = ec.creative_id",
+    "LEFT JOIN pinpoint.public.users u ON u.id = ec.user_id",
+    "ORDER BY 5 DESC",
+    "LIMIT 500",
+  ].join('\n');
 }
 
 function buildTypeBreakdownSQL(campaignId, lookbackDays) {

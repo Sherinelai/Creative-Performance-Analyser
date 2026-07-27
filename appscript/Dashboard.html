@@ -946,7 +946,12 @@ var _statusChartMetric={}; // {cid: 'spend'|'ipm'|'rpi'}
 var _statusHidden={}; // {cid: {spend:false,rpi:false,ipm:false}}
 function renderOverview(){
   // Recent creative changes — left/right layout
-  var pausedEntries=(R.statusLog||[]).filter(function(e){return e.change_type==='paused';});
+  // Two kinds of change: 'paused' (state change) and 'unassigned' (detached from this campaign).
+  // A detached creative is usually still 'enabled', so it never shows up as a pause anywhere —
+  // this list is the only place it surfaces.
+  var pausedEntries=(R.statusLog||[]).filter(function(e){
+    return e.change_type==='paused'||e.change_type==='unassigned';
+  });
   // Enrich with spend data and sort by spend % descending
   var totalCampSpend=R.totalSpend||((R.creativePerf||[]).reduce(function(s,c){return s+(c.spend||0);},0))||1;
   pausedEntries.forEach(function(e){
@@ -954,13 +959,21 @@ function renderOverview(){
     e._cp=cp;
     e._spend=cp?cp.spend||0:0;
     e._sowPct=e._spend/totalCampSpend*100;
-    e._fmt=cp?cp.mco_group||invToDN(cp.competing_group):'Unknown';
-    e._isMab=(e.changed_by||'').toLowerCase().indexOf('mab')>=0||(e.changed_by||'').toLowerCase().indexOf('auto')>=0;
+    // A detached creative may not be in creativePerf at all; fall back to the format the
+    // unassigned query reported for it.
+    e._fmt=cp?(cp.mco_group||invToDN(cp.competing_group)):(e.inventory_format?invToDN(e.inventory_format):'Unknown');
+    e._unassigned=(e.change_type==='unassigned');
+    // Only MCO's own pause decisions get an AI explanation — never a human detaching a creative.
+    e._isMab=!e._unassigned&&((e.changed_by||'').toLowerCase().indexOf('mab')>=0||(e.changed_by||'').toLowerCase().indexOf('auto')>=0);
   });
   pausedEntries.sort(function(a,b){return b._sowPct-a._sowPct;});
   if(!_selectedStatusCid&&pausedEntries.length>0)_selectedStatusCid=String(pausedEntries[0].creative_id);
 
-  var h='<div class="module"><div class="mod-h"><h3>Recent creative changes</h3><span class="badge badge-b">'+pausedEntries.length+' paused</span></div>';
+  var _nUnassigned=pausedEntries.filter(function(e){return e._unassigned;}).length;
+  var _nPaused=pausedEntries.length-_nUnassigned;
+  var h='<div class="module"><div class="mod-h"><h3>Recent creative changes</h3>'
+    +'<span class="badge badge-b">'+_nPaused+' paused</span>'
+    +(_nUnassigned>0?'<span class="badge badge-a">'+_nUnassigned+' detached</span>':'')+'</div>';
 
   if(pausedEntries.length>0){
     // ── Summary box: format-level pause stats ──
@@ -995,7 +1008,7 @@ function renderOverview(){
     visibleEntries.forEach(function(e){
       var isSel=String(e.creative_id)===_selectedStatusCid;
       h+='<div class="sl-item'+(isSel?' sl-active':'')+'" data-act="selectStatusCid" data-val="'+e.creative_id+'" style="cursor:pointer;padding:8px 10px;border-radius:8px;margin-bottom:4px;transition:background 0.12s;'+(isSel?'background:var(--peribg);':'')+'display:flex;gap:8px;align-items:flex-start">';
-      h+='<div class="tl-dot" style="background:var(--rd);margin-top:5px;flex-shrink:0"></div>';
+      h+='<div class="tl-dot" style="background:'+(e._unassigned?'var(--am)':'var(--rd)')+';margin-top:5px;flex-shrink:0"></div>';
       h+='<div style="flex:1;min-width:0">';
       h+='<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">';
       h+='<span style="font-size:var(--f5);font-weight:600;color:var(--slate)">CID '+e.creative_id+'</span>';
@@ -1003,8 +1016,8 @@ function renderOverview(){
       h+='<span style="font-size:var(--f7);padding:1px 6px;border-radius:6px;background:'+fc+'18;color:'+fc+';font-weight:500;border:1px solid '+fc+'30">'+e._fmt+'</span>';
       h+='<span style="font-size:var(--f7);font-weight:600;color:var(--rd)">'+e._sowPct.toFixed(1)+'%</span>';
       h+='</div>';
-      var isMabEntry=(e.changed_by||'').toLowerCase().indexOf('mab')>=0||(e.changed_by||'').toLowerCase().indexOf('auto')>=0;
-      var pauseBadge=isMabEntry?'<span style="font-size:8px;padding:1px 5px;border-radius:4px;background:var(--rdbg);color:var(--rd);font-weight:600">MAB</span>':'<span style="font-size:8px;padding:1px 5px;border-radius:4px;background:var(--sf2);color:var(--tx3);font-weight:500">Manual</span>';
+      var isMabEntry=!!e._isMab;
+      var pauseBadge=e._unassigned?'<span style="font-size:8px;padding:1px 5px;border-radius:4px;background:var(--ambg);color:var(--am);font-weight:600">DETACHED</span>':isMabEntry?'<span style="font-size:8px;padding:1px 5px;border-radius:4px;background:var(--rdbg);color:var(--rd);font-weight:600">MAB</span>':'<span style="font-size:8px;padding:1px 5px;border-radius:4px;background:var(--sf2);color:var(--tx3);font-weight:500">Manual</span>';
       h+='<div style="font-size:var(--f6);color:var(--tx2);margin-top:3px;display:flex;gap:4px;align-items:center;flex-wrap:wrap">'+pauseBadge+'<span>'+( e.changed_by||'unknown')+'</span></div>';
       h+='<div style="font-size:var(--f7);color:var(--tx3);margin-top:1px">'+(e.date||'')+'</div>';
       h+='</div></div>';
