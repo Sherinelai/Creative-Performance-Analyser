@@ -289,6 +289,8 @@ header{padding-bottom:18px;border-bottom:1.5px solid var(--bd);margin-bottom:18p
     <input type="text" id="searchInput" placeholder="Enter Campaign ID...">
     <select id="searchType"><option value="campaign" selected>Campaign ID</option><option value="app" disabled style="color:var(--steel)">App ID</option></select>
     <select id="lookbackSelect" onchange="onLookbackChange(this.value)">
+      <option value="7">Last 7 days</option>
+      <option value="14">Last 14 days</option>
       <option value="30" selected>Last 30 days</option>
       <option value="60">Last 60 days</option>
       <option value="90">Last 90 days</option>
@@ -534,7 +536,7 @@ function updateLookbackBadge(days){
 function updateDateLabels(){
   var sel=document.getElementById('lookbackSelect');
   if(!sel)return;
-  [30,60,90].forEach(function(d,i){if(sel.options[i]){var r=getDateRange(d);sel.options[i].textContent=r.label+' ('+d+'D)';}});
+  [7,14,30,60,90].forEach(function(d,i){if(sel.options[i]){var r=getDateRange(d);sel.options[i].textContent=r.label+' ('+d+'D)';}});
 }
 function onLookbackChange(val){
   var customWrap=document.getElementById('customDateWrap');
