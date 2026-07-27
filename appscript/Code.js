@@ -1504,6 +1504,13 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
       classifyCreativePerformance_(result.creativePerf || [],
         isCpa, { roas: campAvgRoas, rpa: campAvgRpa, rpi: campAvgRpi });
 
+      // How many creatives could be classified at all. Every performance class requires
+      // variance === 'high', and variance only exists when the creative has a confidence
+      // interval — on campaign 41535 that was 21 of 79, so ~3/4 of creatives can never be
+      // tagged. The recommendation says so rather than implying it screened everything.
+      var classifiable = (result.creativePerf || []).filter(function(c){ return c.variance != null; }).length;
+      var perfTotal = (result.creativePerf || []).length;
+
       var poorCids=[], poorPausedCids=[], soleActiveFormats=[];
       (result.creativePerf || []).forEach(function(c){
         if (c.perf_class !== 'poor') return;
@@ -1528,7 +1535,7 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
           result.recommendations.push({
             level:'warning',
             title:'Detach '+poorCids.length+' confirmed poor active creative'+(poorCids.length>1?'s':''),
-            body:'These active creatives have low variance CI (high confidence), RPI above campaign average, and '+(isCpa?'RPA above':'ROAS below')+' campaign average: '+poorCids.join(', ')+'. Detach from this campaign only — don\'t pause globally. Limit to 20% of GR per round. Keep at least 1 per format.'+pausedNote
+            body:'These active creatives have low variance CI (high confidence), RPI above campaign average, and '+(isCpa?'RPA above':'ROAS below')+' campaign average: '+poorCids.join(', ')+'. Detach from this campaign only — don\'t pause globally. Limit to 20% of GR per round. Keep at least 1 per format.'+pausedNote+' Screened '+classifiable+' of '+perfTotal+' creatives — the rest have no confidence interval yet and cannot be classified.'
           });
         } else if(poorPausedCids.length>0){
           result.recommendations.push({
@@ -2299,7 +2306,12 @@ function mergeAllData(perfData, inventory, campaignId) {
   inventory.forEach(function(r) { if (r.creative_id) invById[String(r.creative_id)] = r; });
 
   if (perfData.length > 0) {
-    return perfData.map(function(p) {
+    // Query E can return a row with a NULL creative_id (verified on campaign 41535: 1 of 80
+    // rows — no creative_id, no state, zero spend/revenue/installs). Keeping it inflated the
+    // Total-creatives count by one and landed in the "other state" bucket, which is part of why
+    // Active + Paused didn't add up. Drop rows that aren't a creative.
+    return perfData.filter(function(p) { return p.creative_id != null && String(p.creative_id) !== ''; })
+                   .map(function(p) {
       var inv = invById[String(p.creative_id)] || {};
       var margin = parseFloat(p.roas_ci_margin);
       var variance = null;
