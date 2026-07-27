@@ -77,9 +77,20 @@ Tables (`SQL_CONN = 'accelerate_trino'`):
   `creative_state_events`, `creative_selection_configurations`, `apps`, `goals`, `campaign_types`
 - `hive.bi.cstudio_analytics_daily_v1` — MCO status, `optimization_state`, creative daily metrics
 - `analytics.daily`, `analytics.trimmed_daily`, `analytics.daily_attr_event_d7`
-- `looker.*cstudio__creative_format*` — a **dated PDT**. Never hardcode the name; `getPDT()`
-  (`Code.js:254`) discovers it via `SHOW TABLES FROM looker LIKE '%cstudio__creative_format%'` and
-  caches 1 h. Same for `getQueuePDT()` (`Code.js:1596`).
+- `looker.*cstudio__creative_format*` and `looker.*queue_creative_statistics*` — **dated PDTs**.
+  Never hardcode a name: `getPDT()` / `getQueuePDT()` go through `resolvePDT_()`, which lists the
+  `SHOW TABLES LIKE` candidates, **verifies the columns the app reads** via `SHOW COLUMNS`, walks
+  backwards until one passes, caches for 1 h, and otherwise throws with the full candidate list.
+  Taking "the last match" alone would silently query the wrong generation.
+
+Campaign search covers **every** campaign state (`enabled` / `paused` / `hidden` / `deleted` —
+2026-07-27 counts 2,986 / 71,722 / 2,189 / 2,114), ranked live-first by `CAMPAIGN_STATE_RANK`, so a
+paused or hidden campaign is analysable and the state is shown in the preview and overview. The rank
+must be a **selected column** (`state_rank`), not an `ORDER BY` expression — these are
+`SELECT DISTINCT` queries and Trino rejects ORDER BY expressions that aren't in the select list.
+Correspondingly, the creative-state queries deliberately omit the reference query's
+`campaigns.state = 'enabled'` filter, which would blank the pipeline states for exactly those
+campaigns.
 
 Windowing constants: `DEFAULT_LOOKBACK_DAYS = 30`, `DATA_BAKE_DAYS = 7` — the last 7 days are excluded
 because attribution has not settled. Any new metric must respect the same bake window or it will

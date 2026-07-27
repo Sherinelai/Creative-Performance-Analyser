@@ -341,6 +341,32 @@ function lookerGet(endpoint) {
 var SQL_CONN = 'accelerate_trino';
 var DATA_BAKE_DAYS = 7; // Fully-baked data: exclude last 7 days (attribution window)
 
+// ── Campaign search scope ───────────────────────────────────
+// pinpoint.public.campaigns.state is one of: enabled / paused / hidden / deleted
+// (2026-07-27 counts: 2,986 / 71,722 / 2,189 / 2,114).
+// Search covers ALL of them — a strategist pasting a campaign ID for a paused or hidden
+// campaign should get the analysis, not "not found". The state is shown in the preview and
+// the overview so nobody mistakes a historical campaign for a live one. Ranking below puts
+// live campaigns first when a name search matches several.
+// This is also why the three creative-state queries deliberately DON'T filter
+// campaigns.state = 'enabled' the way the reference Looker query does: that filter would
+// blank out the pipeline states for exactly the campaigns a user is investigating.
+var CAMPAIGN_STATE_RANK = { enabled: 1, paused: 2, hidden: 3, deleted: 4 };
+
+/**
+ * SELECT-list expression ranking campaign states. It has to be a selected column, not an
+ * ORDER BY expression: these are SELECT DISTINCT queries and Trino rejects
+ * "For SELECT DISTINCT, ORDER BY expressions must appear in select list" (verified).
+ * Pair with ORDER_BY_CAMPAIGN_STATE below.
+ */
+function campaignStateRankSQL(alias) {
+  var cases = Object.keys(CAMPAIGN_STATE_RANK).map(function(s) {
+    return "WHEN '" + s + "' THEN " + CAMPAIGN_STATE_RANK[s];
+  });
+  return 'CASE ' + (alias || 'c') + '.state ' + cases.join(' ') + ' ELSE 9 END AS state_rank';
+}
+var ORDER_BY_CAMPAIGN_STATE = 'ORDER BY state_rank, campaign_id DESC';
+
 
 // Safe parseFloat: returns null only for NaN/undefined/null, preserves 0
 function pf(v) { if (v == null || v === '' || v === 'null') return null; var n = parseFloat(v); return isNaN(n) ? null : n; }
@@ -418,19 +444,74 @@ function runSQLParallel(sqlMap) {
 
 
 // ═══════════════════════════════════════════════════════════
-// PDT AUTO-DISCOVERY
+// PDT AUTO-DISCOVERY — with a column sanity check
+//
+// Looker PDT names are dated (looker.lr_<hash>_<name>), so they must be discovered rather
+// than hardcoded. "Take the last SHOW TABLES match" is not enough on its own: if several
+// generations of a PDT coexist, or a rebuild renames columns, the app would silently query
+// the wrong table and mislabel every creative. resolvePDT_ therefore verifies the columns it
+// depends on and walks backwards through the candidates until one passes, failing loudly
+// with the full candidate list if none does.
 // ═══════════════════════════════════════════════════════════
+
+/** Column names present on a table, lowercased. */
+function pdtColumns_(table) {
+  var out = {};
+  runSQL('SHOW COLUMNS FROM ' + table).forEach(function(r) {
+    var c = r.Column || r.column || r.Field || null;
+    if (!c) { var vals = Object.keys(r).map(function(k){ return r[k]; }); c = vals.length ? vals[0] : null; }
+    if (c) out[String(c).toLowerCase()] = true;
+  });
+  return out;
+}
+
+/**
+ * Resolve one dated PDT and prove it is usable.
+ * @param {string} pattern      SHOW TABLES LIKE pattern, e.g. '%queue_creative_statistics%'
+ * @param {Array<string>} needs columns the app reads off this table
+ * @param {string} cacheKey     script-cache key (1 h)
+ * @param {string} label        for errors / logs
+ */
+function resolvePDT_(pattern, needs, cacheKey, label) {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  var rows = runSQL("SHOW TABLES FROM looker LIKE '" + pattern + "'");
+  var names = (rows || []).map(function(r) {
+    if (r.Table) return r.Table;
+    var vals = Object.keys(r).map(function(k){ return r[k]; });
+    return vals.length ? vals[0] : null;
+  }).filter(Boolean);
+
+  if (!names.length) throw new Error(label + ' PDT not found in the looker schema (LIKE ' + pattern + ')');
+  if (names.length > 1) Logger.log(label + ': ' + names.length + ' candidates — ' + names.join(', '));
+
+  var problems = [];
+  for (var i = names.length - 1; i >= 0; i--) {          // newest last, by Looker convention
+    var table = 'looker.' + names[i];
+    try {
+      var cols = pdtColumns_(table);
+      var missing = needs.filter(function(c) { return !cols[String(c).toLowerCase()]; });
+      if (!missing.length) {
+        cache.put(cacheKey, table, 3600);
+        Logger.log(label + ' PDT: ' + table + ' (verified ' + needs.length + ' columns)');
+        return table;
+      }
+      problems.push(names[i] + ' missing [' + missing.join(', ') + ']');
+    } catch (e) {
+      problems.push(names[i] + ' unreadable (' + e.message + ')');
+    }
+  }
+  throw new Error(label + ' PDT: no candidate has the required columns [' + needs.join(', ') +
+                  ']. Checked: ' + problems.join('; '));
+}
+
 var _pdtTable = null;
 function getPDT() {
   if (_pdtTable) return _pdtTable;
-  var cache = CacheService.getScriptCache();
-  var cached = cache.get('pdt_creative_format');
-  if (cached) { _pdtTable = cached; return _pdtTable; }
-  var rows = runSQL("SHOW TABLES FROM looker LIKE '%cstudio__creative_format%'");
-  if (!rows.length) throw new Error('Creative format PDT not found in looker schema');
-  _pdtTable = 'looker.' + rows[rows.length - 1].Table;
-  cache.put('pdt_creative_format', _pdtTable, 3600);
-  Logger.log('PDT discovered: ' + _pdtTable);
+  _pdtTable = resolvePDT_('%cstudio__creative_format%',
+    ['creative_id', 'creative_format_derived'], 'pdt_creative_format', 'Creative format');
   return _pdtTable;
 }
 
@@ -450,12 +531,13 @@ function previewCampaign(input) {
     var sql1 = [
       "SELECT DISTINCT c.id AS campaign_id, c.display_name AS campaign_name, c.app_id,",
       "  c.state AS campaign_state, c.customer_id,",
-      "  ct.name AS campaign_type",
+      "  ct.name AS campaign_type,",
+      "  " + campaignStateRankSQL('c'),
       "FROM pinpoint.public.campaigns c",
       "LEFT JOIN pinpoint.public.campaign_types ct ON c.campaign_type_id = ct.id",
       where,
-      "AND c.state IN ('enabled', 'paused')",
-      "ORDER BY c.id DESC LIMIT 10",
+      // No state filter — see CAMPAIGN_STATE_RANK. Live campaigns rank first.
+      ORDER_BY_CAMPAIGN_STATE + " LIMIT 10",
     ].join('\n');
     var camps = runSQL(sql1);
     if (!camps.length) return { campaigns: [] };
@@ -517,7 +599,11 @@ function fetchCampaignSearch(input) {
   var where = isNum
     ? "WHERE (c.id = " + input + " OR c.app_id = " + input + ")"
     : "WHERE LOWER(c.display_name) LIKE LOWER('%" + input.replace(/'/g, "''") + "%')";
-  return runSQL("SELECT DISTINCT c.id AS campaign_id, c.display_name AS campaign_name, c.app_id, c.state AS campaign_state, c.customer_id FROM pinpoint.public.campaigns c " + where + " AND c.state IN ('enabled', 'paused') ORDER BY c.id DESC LIMIT 20");
+  // Every state is searchable (see CAMPAIGN_STATE_RANK); live campaigns are returned first,
+  // which is also what fetchCreativeData picks when an app-name search matches several.
+  return runSQL("SELECT DISTINCT c.id AS campaign_id, c.display_name AS campaign_name, c.app_id, c.state AS campaign_state, c.customer_id, "
+    + campaignStateRankSQL('c') + " FROM pinpoint.public.campaigns c "
+    + where + " " + ORDER_BY_CAMPAIGN_STATE + " LIMIT 20");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -860,7 +946,7 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
     Logger.log('Step 1: Search "' + searchInput + '"');
     var campaigns = fetchCampaignSearch(searchInput);
     Logger.log('Found ' + campaigns.length + ' campaigns');
-    if (!campaigns.length) return { error: 'No enabled campaigns found for "' + searchInput + '".' };
+    if (!campaigns.length) return { error: 'No campaign found for "' + searchInput + '" — searched every campaign state (enabled, paused, hidden, deleted). Check the ID or name.' };
 
     var camp = searchType === 'campaign'
       ? (campaigns.find(function(c){ return String(c.campaign_id)===String(searchInput); }) || campaigns[0])
@@ -1772,16 +1858,16 @@ function buildDailyCreativeMetricsSQL(campaignId, lookbackDays) {
 // Used by all three lifecycle queries (queuing / exploring / optimizing)
 // ═══════════════════════════════════════════════════════════
 var _queuePdtTable = null;
+/**
+ * The creative-state PDT. The three columns below ARE the state definition
+ * (MCO_RULES.creative_states) — if a rebuild drops or renames one, resolvePDT_ fails loudly
+ * instead of letting every creative be silently mislabeled.
+ */
 function getQueuePDT() {
   if (_queuePdtTable) return _queuePdtTable;
-  var cache = CacheService.getScriptCache();
-  var cached = cache.get('pdt_queue_creative_statistics');
-  if (cached) { _queuePdtTable = cached; return _queuePdtTable; }
-  var rows = runSQL("SHOW TABLES FROM looker LIKE '%queue_creative_statistics%'");
-  if (!rows.length) throw new Error('queue_creative_statistics PDT not found');
-  _queuePdtTable = 'looker.' + rows[rows.length - 1].Table;
-  cache.put('pdt_queue_creative_statistics', _queuePdtTable, 3600);
-  Logger.log('Queue PDT: ' + _queuePdtTable);
+  _queuePdtTable = resolvePDT_('%queue_creative_statistics%',
+    ['creative_id', 'is_currently_queue_eligible', 'is_currently_optimizing', 'current_status'],
+    'pdt_queue_creative_statistics', 'Queue creative statistics');
   return _queuePdtTable;
 }
 
@@ -2281,6 +2367,123 @@ function testPreview() {
 function testConnection() {
   try { getAccessToken(); Logger.log('Auth OK'); runSQL('SELECT 1 AS test'); Logger.log('SQL OK'); Logger.log('PDT: ' + getPDT()); return 'All OK'; }
   catch(e) { Logger.log('FAIL: ' + e.message); return 'FAIL'; }
+}
+
+// ═══════════════════════════════════════════════════════════
+// HEALTH CHECK — run this from the editor BEFORE redeploying
+//
+// Checks every external dependency and every single-source invariant, and keeps going after
+// a failure so one run tells you everything that is wrong. Returns a summary string; the full
+// report is in the execution log (View → Logs).
+//
+// It is also the fastest way to confirm the Script Properties are set correctly: a missing
+// LOOKER_CLIENT_ID shows up here as a named failure instead of a broken dashboard.
+// ═══════════════════════════════════════════════════════════
+function runHealthCheck() {
+  var out = [], pass = 0, fail = 0;
+  function check(name, fn) {
+    try {
+      var detail = fn();
+      pass++; out.push('PASS  ' + name + (detail ? ' — ' + detail : ''));
+    } catch (e) {
+      fail++; out.push('FAIL  ' + name + ' — ' + e.message);
+    }
+  }
+
+  var props = PropertiesService.getScriptProperties();
+
+  // ── 1. Script Properties ──
+  check('Script Property LOOKER_CLIENT_ID', function() {
+    var v = props.getProperty('LOOKER_CLIENT_ID');
+    if (!v) throw new Error('not set — Project Settings → Script Properties');
+    return 'set (' + v.length + ' chars)';
+  });
+  check('Script Property LOOKER_CLIENT_SECRET', function() {
+    if (!props.getProperty('LOOKER_CLIENT_SECRET')) throw new Error('not set');
+    return 'set';
+  });
+  check('Script Property CLAUDE_API_KEY', function() {
+    if (!props.getProperty('CLAUDE_API_KEY')) throw new Error('not set — AI insights will fail');
+    return 'set';
+  });
+
+  // ── 2. Looker / Trino ──
+  check('Looker auth', function() { getAccessToken(); return 'token acquired'; });
+  check('Trino connection (' + SQL_CONN + ')', function() {
+    var r = runSQL('SELECT 1 AS ok');
+    if (!r.length) throw new Error('query returned no rows');
+    return 'SELECT 1 ok';
+  });
+
+  // ── 3. Dated PDTs + their required columns ──
+  check('Creative format PDT', function() { return getPDT(); });
+  check('Queue (creative state) PDT', function() { return getQueuePDT(); });
+
+  // ── 4. The three creative-state predicates actually return data ──
+  check('Creative-state queries', function() {
+    var t = getQueuePDT();
+    var r = runSQL([
+      'SELECT',
+      "  COUNT_IF(is_currently_queue_eligible AND NOT COALESCE(is_currently_optimizing,false) AND current_status='excluded') AS queuing,",
+      "  COUNT_IF(is_currently_queue_eligible AND NOT COALESCE(is_currently_optimizing,false) AND current_status='included') AS exploring,",
+      '  COUNT_IF(NOT COALESCE(is_currently_queue_eligible,false) AND is_currently_optimizing) AS optimizing',
+      'FROM ' + t
+    ].join('\n'));
+    if (!r.length) throw new Error('no rows');
+    var q = r[0];
+    if ((+q.queuing + +q.exploring + +q.optimizing) === 0) throw new Error('all three states are empty — check the PDT');
+    return 'queuing ' + q.queuing + ' / exploring ' + q.exploring + ' / optimizing ' + q.optimizing;
+  });
+
+  // ── 5. Single-source invariants (cheap, no network) ──
+  check('MCO_RULES creative states', function() {
+    var s = Object.keys(MCO_RULES.creative_states);
+    if (s.length !== 3) throw new Error('expected 3 states, found ' + s.length);
+    return s.join(' / ');
+  });
+  check('MCO_RULES diagnosis codes', function() {
+    var n = Object.keys(MCO_RULES.diagnosis_codes).length;
+    if (n < 13) throw new Error('expected 13+, found ' + n);
+    return n + ' codes';
+  });
+  check('Inventory-group map', function() {
+    var n = Object.keys(MCO_GROUP_MAP_GS).length;
+    var groups = {};
+    Object.keys(MCO_GROUP_MAP_GS).forEach(function(k) { groups[MCO_GROUP_MAP_GS[k]] = true; });
+    KEY_FORMATS.forEach(function(f) { if (!groups[f]) throw new Error('KEY_FORMATS entry "' + f + '" is not a target of the map'); });
+    return n + ' formats → ' + Object.keys(groups).length + ' groups';
+  });
+  check('Metric definitions', function() {
+    Object.keys(PRIMARY_METRIC_BY_CAMPAIGN_TYPE).forEach(function(t) {
+      var m = PRIMARY_METRIC_BY_CAMPAIGN_TYPE[t];
+      if (!METRICS[m]) throw new Error('campaign type ' + t + ' maps to unknown metric ' + m);
+    });
+    return Object.keys(METRICS).length + ' metrics, all campaign types mapped';
+  });
+  check('AI system prompt', function() {
+    var p = getSkillContent();
+    if (p.length < 5000) throw new Error('suspiciously short (' + p.length + ' chars) — run tools/sync_skill.py');
+    if (p.indexOf('Authoritative thresholds') < 0) throw new Error('MCO_RULES block missing');
+    if (p.indexOf('Metric definitions') < 0) throw new Error('METRICS block missing');
+    if (p.indexOf('Creative state (authoritative') < 0) throw new Error('creative-state block missing');
+    return p.length + ' chars, all three data blocks present';
+  });
+
+  // ── 6. End to end on a known campaign ──
+  check('Campaign search covers every state', function() {
+    var r = runSQL("SELECT state, COUNT(*) AS n FROM pinpoint.public.campaigns GROUP BY 1");
+    var states = r.map(function(x){ return x.state; });
+    ['enabled', 'paused'].forEach(function(s) {
+      if (states.indexOf(s) < 0) throw new Error('state "' + s + '" not present in pinpoint.public.campaigns');
+    });
+    return states.join(', ');
+  });
+
+  var summary = pass + ' passed, ' + fail + ' failed';
+  Logger.log('═══ HEALTH CHECK — ' + summary + ' ═══');
+  out.forEach(function(l) { Logger.log(l); });
+  Logger.log('═══ ' + (fail ? 'NOT SAFE TO DEPLOY — fix the failures above' : 'all checks passed') + ' ═══');
+  return summary + (fail ? ' — see the log' : '');
 }
 
 // ═══════════════════════════════════════════════════════════

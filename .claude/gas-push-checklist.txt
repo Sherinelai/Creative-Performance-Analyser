@@ -5,6 +5,10 @@ DEPLOY
     uploads NOTHING. If the output does not list the changed files, the push FAILED.
   • push only updates the HEAD version. The /exec web app keeps serving the OLD code until you
     redeploy (`clasp create-deployment`, or Deploy → Manage deployments in the editor).
+  • BEFORE redeploying: run `runHealthCheck()` from the Apps Script editor. It verifies the Script
+    Properties (incl. LOOKER_CLIENT_ID), Looker auth, Trino, both dated PDTs and their required
+    columns, that the three creative-state predicates return data, and that the AI prompt carries
+    all three data blocks. It keeps going after a failure, so one run lists everything wrong.
 
 DASHBOARD.HTML
   • Served with createHtmlOutputFromFile (NOT createTemplate) — there are no <?= ?> scriptlets and no
