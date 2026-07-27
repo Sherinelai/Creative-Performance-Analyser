@@ -1150,11 +1150,12 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
     var cfgRows   = b1.config    || [];
     Logger.log('Perf: ' + perfData.length + ' | Inventory: ' + inventory.length + ' | Config: ' + cfgRows.length);
     if (!cfgRows.length) {
-      // buildCampaignConfigSQL currently fails outright: it selects apps.bundle_id, which no
-      // longer exists in pinpoint.public.apps ("Column 'apps.bundle_id' cannot be resolved").
-      // Survivable — MCO status comes from the batch-2 meta query and campType from the name —
-      // but it silently costs the app name and the KPI target. Fix the column list.
-      Logger.log('Config query returned nothing (check apps.bundle_id — dropped upstream)');
+      // Survivable — MCO status also comes from the batch-2 meta query and campType from the
+      // campaign name — but it costs the real app name, so it is worth noticing. Two stale column
+      // references used to make this query fail outright for EVERY campaign (apps.bundle_id and
+      // campaigns.campaign_type); if it goes quiet again, run the query through
+      // tools/dump_sql.js + creative_mcp and read the actual error.
+      Logger.log('Config query returned nothing — check its columns against the live schema');
     }
 
     // Parse config
@@ -2058,7 +2059,11 @@ function buildCreativeInventorySQL(campaignId) {
 function buildCampaignConfigSQL(appId) {
   return [
     "WITH pinpoint__apps AS (",
-    "  SELECT apps.id, apps.bundle_id,",
+    // apps.bundle_id was dropped upstream ("Column 'apps.bundle_id' cannot be resolved"), which
+    // made this whole query fail — silently, because runSQLParallel degrades a failure to [] — so
+    // every campaign lost its app name and KPI target. display_name is the app's name and is what
+    // bundle_id was standing in for: id 6824 -> 'Gossip Harbor (iOS)'.
+    "  SELECT apps.id, apps.display_name AS app_display_name,",
     "    MAX(CASE WHEN csc.selection_strategy = 'multiarm-bandit' AND csc.enabled = True THEN 'MCO'",
     "             WHEN csc.selection_strategy = 'random' AND csc.enabled = True THEN 'Free-floating'",
     "             ELSE NULL END) AS creative_selection_method",
@@ -2079,8 +2084,9 @@ function buildCampaignConfigSQL(appId) {
     "  c.id AS campaign_id,",
     "  c.display_name AS campaign_name,",
     "  c.app_id,",
-    "  pa.bundle_id AS app_name,",
-    "  c.campaign_type,",
+    "  pa.app_display_name AS app_name,",
+    // campaigns has campaign_type_id, not campaign_type — the name lives in campaign_types.
+    "  ct.name AS campaign_type,",
     "  c.current_optimization_state AS optimization_state,",
     "  CASE",
     "    WHEN pa.creative_selection_method = 'MCO' THEN 'MCO'",
@@ -2089,10 +2095,12 @@ function buildCampaignConfigSQL(appId) {
     "    ELSE 'Free-floating'",
     "  END AS mco_status",
     "FROM pinpoint.public.campaigns c",
+    "LEFT JOIN pinpoint.public.campaign_types ct ON c.campaign_type_id = ct.id",
     "LEFT JOIN pinpoint__apps pa ON c.app_id = pa.id",
     "LEFT JOIN cstudio_mco cm ON c.id = cm.campaign_id",
     "WHERE c.app_id = " + appId,
-    "  AND c.state IN ('enabled', 'paused')",
+    // No state filter: campaign search covers every state (see CAMPAIGN_STATE_RANK), so a hidden
+    // or deleted campaign must still get its config rather than silently losing its app name.
     "ORDER BY c.id DESC",
     "LIMIT 50",
   ].join('\n');
