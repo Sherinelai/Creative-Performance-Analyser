@@ -390,6 +390,31 @@ var MCO_GROUP_MAP={};      // inventory_format → MCO Inventory Group (from the
 /** MCO_RULES from the server, or null before it arrives / outside Apps Script. */
 function mcoRules(){ return CFG&&CFG.mcoRules?CFG.mcoRules:null; }
 
+/** One THRESHOLDS value (Code.js), or null if config hasn't arrived. Never hardcode one here. */
+function TH(name){ return (CFG&&CFG.thresholds&&CFG.thresholds[name]!=null)?CFG.thresholds[name]:null; }
+
+/** One METRICS entry (Code.js): {label, direction, definition}. */
+function metricDef(key){ return (CFG&&CFG.metrics&&CFG.metrics[key])?CFG.metrics[key]:null; }
+
+/** 'RPA' / '7D ROAS' — the display label for a metric key. */
+function metricLabel(key){ var m=metricDef(key); return m?m.label:String(key||'').toUpperCase(); }
+
+/** 'RPA (cost per event, lower=better)' — label plus direction, built from METRICS. */
+function metricLabelWithDirection(key){
+  var m=metricDef(key);
+  if(!m)return metricLabel(key);
+  return m.label+' ('+(m.direction==='lower_is_better'?'lower=better':'higher=better')+')';
+}
+
+/** True when a lower value is better — the only place cost-vs-return is decided client-side. */
+function isCostMetric(key){ var m=metricDef(key); return !!(m&&m.direction==='lower_is_better'); }
+
+/** The metric this campaign type is judged on, from PRIMARY_METRIC_BY_CAMPAIGN_TYPE. */
+function primaryMetricKey(campType){
+  var t=CFG&&CFG.primaryMetricByCampaignType;
+  return (t&&t[campType])?t[campType]:(R&&R._isCpa?'rpa':'roas');
+}
+
 /**
  * Lifecycle state per the Auto-Pauser's own definition: "Optimized" requires BOTH
  * >= min_impressions AND >= min_days_live, so failing EITHER leaves the creative
@@ -1518,7 +1543,7 @@ function localFormatSummary(){
   });
   // Summary
   var topFmt=sorted[0]||'';var topSow=fmtMap[topFmt]?(fmtMap[topFmt].spend/totalSpend*100).toFixed(0):'0';
-  var primaryMetric=isCpa?'RPA':'7D ROAS';
+  var primaryMetric=metricLabel(primaryMetricKey(R&&R.campType));
   // Find best and worst performers
   var bestFmt='',worstFmt='',bestVal=-Infinity,worstVal=Infinity;
   var lowestCpiFmt='',lowestCpi=Infinity,highestCpiFmt='',highestCpi=0;
@@ -1731,7 +1756,7 @@ function renderSpendInner(){
     h+='</div>';
   }
   // Summary table
-  h+='<div class="tbl-wrap" style="margin-top:8px"><button class="copy-btn" data-act="copyTable" data-tbl="spendTbl">&#9112; Copy</button><table class="spend-tbl" id="spendTbl"><tr><th>Format</th><th>Spend</th><th>%</th><th>RPI</th><th>'+(R&&R._isCpa?'RPA':'ROAS')+'</th></tr>';
+  h+='<div class="tbl-wrap" style="margin-top:8px"><button class="copy-btn" data-act="copyTable" data-tbl="spendTbl">&#9112; Copy</button><table class="spend-tbl" id="spendTbl"><tr><th>Format</th><th>Spend</th><th>%</th><th>RPI</th><th>'+(R&&R._metricLabel(primaryMetricKey(R&&R.campType)))+'</th></tr>';
   var perfByGroup={};
   (R.creativePerf||[]).forEach(function(c){
     var lbl=c.mco_group||invToDN(c.competing_group);
@@ -2309,7 +2334,7 @@ function renderMergedTable(){
     if(dn==='Unknown')return; // skip Unknown
     var g=groups[dn];g.creatives.push(c);g.spend+=(c.spend||0);
     if(c.status==='active')g.active++;else g.paused++;
-    if(c.created_date){var d=new Date(c.created_date),diff=Math.floor((now-d)/864e5);if(diff<g.newestDays)g.newestDays=diff;if(diff>=60)g.hasStale=true;}
+    if(c.created_date){var d=new Date(c.created_date),diff=Math.floor((now-d)/864e5);if(diff<g.newestDays)g.newestDays=diff;var _fd=TH('FRESHNESS_DAYS');if(_fd!=null&&diff>=_fd)g.hasStale=true;}
   });
   // Sort groups by selected column (groups with no creatives always go last)
   var sorted=Object.keys(groups).map(function(k){return groups[k];}).sort(function(a,b){
@@ -2330,9 +2355,9 @@ function renderMergedTable(){
     var av=grpVal(a),bv=grpVal(b);
     if(av===null&&bv===null)return b.spend-a.spend;
     if(av===null)return 1;if(bv===null)return -1;
-    // For cost metrics (rpi, rpa, fresh) lower is better → flip mult
-    var flipCols={rpi:1,rpa:1,fresh:1};
-    var fm=flipCols[sc]?-mult:mult;
+    // Cost metrics sort inverted. Direction comes from METRICS (Code.js) — 'fresh' is a
+    // column, not a metric, and is newest-first by the same logic.
+    var fm=(isCostMetric(sc)||sc==='fresh')?-mult:mult;
     return (av-bv)*fm;
   });
   var gSpend=sorted.reduce(function(s,g){return s+g.spend;},0)||1;
@@ -2364,8 +2389,9 @@ function renderMergedTable(){
   if(_tblFilter.states.length||_tblFilter.variance||_tblFilter.cidSearch||_tblFilter.pipeline||_tblFilter.adType||_perfFilter)h+='<button data-act="clearTblFilters" style="font-size:var(--f7);padding:2px 8px;border:none;background:var(--rdbg);color:var(--rd);border-radius:6px;cursor:pointer;font-family:inherit;font-weight:500">&times; Clear</button>';
   h+='</div>';
   // Performance filter + legend
+  // (a local `metricLabel` used to be computed here and never rendered — dropped; it also
+  // shadowed the global metricLabel() helper. Use metricLabelWithDirection(key) if needed.)
   var isPrimRpa=!!(R&&R._isCpa);
-  var metricLabel=isPrimRpa?'RPA (cost per event, lower=better)':'7D ROAS (returns, higher=better)';
   h+='<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;padding:6px 20px 0;background:var(--sf2)">';
   h+='<span style="font-size:var(--f7);color:var(--tx3);font-weight:500;margin-right:2px">Performance:</span>';
   var pfBtns=[

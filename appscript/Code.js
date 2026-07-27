@@ -111,6 +111,37 @@ var MCO_RULES = {
   }
 };
 
+// ═══════════════════════════════════════════════════════════
+// METRICS — SINGLE SOURCE OF TRUTH for what each metric means and which way is good
+//
+// Same three consumers as MCO_RULES: the AI prompt (metricsPromptBlock()), the client
+// (CFG.metrics — labels, and which columns sort inverted), and server-side analysis
+// (_getPrimaryMetric). "lower_is_better" is the only place cost-vs-return is encoded;
+// do not re-write "RPI = cost of install (lower is better)" in a prompt or a UI label.
+// ═══════════════════════════════════════════════════════════
+var METRICS = {
+  roas:    { label: '7D ROAS', direction: 'higher_is_better', definition: 'Return on ad spend over 7 days' },
+  roas_d1: { label: 'D1 ROAS', direction: 'higher_is_better', definition: 'Return on ad spend over 1 day' },
+  rpa:     { label: 'RPA',     direction: 'lower_is_better',  definition: 'Revenue Per Action — the cost of a target event' },
+  rpi:     { label: 'RPI',     direction: 'lower_is_better',  definition: 'Revenue Per Install — the cost of an install' },
+  iti:     { label: 'ITI',     direction: 'higher_is_better', definition: 'Impression-to-Install rate — the metric MCO selects on' },
+  ipm:     { label: 'IPM',     direction: 'higher_is_better', definition: 'Installs Per Mille = ITI x 1000' }
+};
+
+/** Which metric a campaign type is judged on. Used by _getPrimaryMetric and by the client. */
+var PRIMARY_METRIC_BY_CAMPAIGN_TYPE = { ua_cpr: 'roas', re: 'roas', ua_cpa: 'rpa', ua_cpi: 'rpi' };
+
+/** Render METRICS as the "metric reminders" block of the AI system prompt. */
+function metricsPromptBlock() {
+  var L = ['## Metric definitions (authoritative)'];
+  Object.keys(METRICS).forEach(function(k) {
+    var m = METRICS[k];
+    L.push('- **' + m.label + '** (`' + k + '`): ' + m.definition + '. ' +
+           (m.direction === 'lower_is_better' ? 'LOWER is better.' : 'HIGHER is better.'));
+  });
+  return L.join('\n');
+}
+
 /** Render MCO_RULES as a markdown block appended to the AI system prompt. */
 function mcoRulesPromptBlock() {
   var R = MCO_RULES, L = [];
@@ -2194,7 +2225,9 @@ function getConfig() {
     keyFormats: KEY_FORMATS,
     defaultLookback: DEFAULT_LOOKBACK_DAYS,
     mcoGroupMap: MCO_GROUP_MAP_GS,
-    mcoRules: MCO_RULES
+    mcoRules: MCO_RULES,
+    metrics: METRICS,
+    primaryMetricByCampaignType: PRIMARY_METRIC_BY_CAMPAIGN_TYPE
   };
 }
 
@@ -2240,9 +2273,13 @@ function testConnection() {
 // are now unused and can be deleted. To change the skill: edit the repo .md.
 // ═══════════════════════════════════════════════════════════
 
-/** The AI system prompt: generated MCO prose + the authoritative numbers from MCO_RULES. */
+/**
+ * The AI system prompt: generated MCO prose + the authoritative numbers (MCO_RULES) +
+ * the metric definitions (METRICS). Every number and every "lower is better" the model
+ * sees comes from those two objects — the same ones the client reads via getConfig().
+ */
 function getSkillContent() {
-  return MCO_SKILL + '\n\n---\n\n' + mcoRulesPromptBlock();
+  return MCO_SKILL + '\n\n---\n\n' + mcoRulesPromptBlock() + '\n\n' + metricsPromptBlock();
 }
 
 // ── BEGIN GENERATED FROM skills/mco-creative-explainer/SKILL.md — DO NOT EDIT BY HAND ──
@@ -2364,8 +2401,16 @@ var MCO_SKILL = [
   '',
   '| State | Criteria | Behavior |',
   '|-------|----------|----------|',
-  '| **Exploring** | <25K impressions AND <7 days live | Protected from Auto-Pauser. Receives forced impressions via WCS. |',
-  '| **Optimizing** | ≥25K impressions AND ≥7 days live | Normal MCO competition. Eligible for Auto-Pauser. |',
+  '| **Exploring** | <25K impressions **OR** <7 days live | Protected from Auto-Pauser. Receives forced impressions via WCS. |',
+  '| **Optimizing** | ≥25K impressions **AND** ≥7 days live | Normal MCO competition. Eligible for Auto-Pauser. |',
+  '',
+  '> **The two states are complements, so the Exploring row is an OR.** "Optimized" requires',
+  '> *both* counts (see §3), therefore failing *either* one leaves the creative exploring and',
+  '> WCS-protected — which is what §3 "In Practice" already says. An earlier revision of this',
+  '> table wrote the Exploring row as an AND, which left a creative with 30K impressions but',
+  '> only 3 days live in neither state; code implementing that reading treated it as',
+  '> *optimizing*, i.e. eligible for the Auto-Pauser, contradicting the Auto-Pauser\'s own',
+  '> criteria. Corrected 2026-07-27.',
   '',
   '- All new creatives start as "exploring"',
   '- For net-new apps (all exploring), no substitutions until first creative becomes "optimizing"',
@@ -2453,7 +2498,7 @@ var MCO_SKILL = [
   '## 10. Diagnosis Logic',
   '',
   '1. **Free Floating** → `free_floating_random` (recommend adopting MCO)',
-  '2. **<25K imps AND <7 days** → exploring (`wcs_protected` or `throttle_queued`)',
+  '2. **<25K imps OR <7 days** (i.e. not yet "Optimized") → exploring (`wcs_protected` or `throttle_queued`)',
   '3. **Paused**: compare ITI vs group, check spend share <5%, selection prob <10%',
   '4. **Spending + highest ITI** → `winning_highest_iti`; otherwise check eligibility',
   '5. **Not spending + lower ITI** → `losing_iti_competition`',
@@ -2469,7 +2514,7 @@ var MCO_SKILL = [
   '| **ITI** | Impression-to-Install rate (30-day window) |',
   '| **WCS** | Winner Candidate Substitution |',
   '| **Auto-Pauser** | Pauses underperforming optimized creatives |',
-  '| **Exploring** | <25K imps AND <7 days, protected |',
+  '| **Exploring** | <25K imps OR <7 days (not yet Optimized), protected |',
   '| **Optimizing** | ≥25K imps AND ≥7 days, normal competition |',
   '| **Free Floating** | Non-MCO, random selection |',
   '| **Inventory Format** | e.g. phone-portrait-vast-30s |',
@@ -2567,7 +2612,6 @@ function diagnoseMcoCreative(creativeData) {
     '6. Missing the data you would need → insufficient_data with confidence "low"',
     '',
     '`format` must be the MCO Inventory Group name (e.g. "Phone Portrait VAST"), not the raw inventory_format.',
-    'Metric reminders: RPI = cost of install (lower is better). ROAS = returns (higher is better). RPA = cost per target event (lower is better).',
     'Lead with the reason. Cite specific numbers from the data. Two to three sentences of explanation, no more.',
   ].join('\n');
 
@@ -2600,7 +2644,6 @@ function summarizeFormatTrends(trendData) {
     '',
     'Rules:',
     '- Format names in the data are MCO Inventory Group names. ALWAYS use the exact name from the input.',
-    '- RPI = cost of install (lower is better). ROAS = returns on spend (higher is better). RPA = cost per target event (lower is better).',
     '- Reference specific numbers (spend %, ROAS values, RPI).',
     '- Flag formats with declining ROAS or disproportionate spend vs performance.',
     '- Remember format-level spend is decided by ML pricing, not by MCO — do not attribute a spend shift to MCO.',
@@ -2880,9 +2923,9 @@ function detectCampaignType(config, data) {
 }
 
 function _getPrimaryMetric(campType) {
-  if (campType === 'ua_cpr' || campType === 're') return 'roas';
-  if (campType === 'ua_cpa') return 'rpa';
-  return 'rpi';
+  // Mapping lives in PRIMARY_METRIC_BY_CAMPAIGN_TYPE (top of file) — the client reads the
+  // same table via getConfig(), so a label there can't disagree with the metric used here.
+  return PRIMARY_METRIC_BY_CAMPAIGN_TYPE[campType] || 'rpi';
 }
 
 function getCampaignLabel(t) {

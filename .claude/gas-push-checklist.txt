@@ -20,10 +20,12 @@ CODE.JS
     looker.*cstudio__creative_format* PDT name is dated — use getPDT(), never a literal.
   • Respect DATA_BAKE_DAYS = 7 (attribution not settled) or the metric reads low.
 
-CONSISTENCY (things that exist in more than one place — change all of them or none)
-  • MCO group mapping: MCO_GROUP_MAP_GS (Code.js), DN_TO_BASE (fetchCreativeData), invToDN (Dashboard.html)
-  • MCO rules/diagnosis codes: skills/mco-creative-explainer/SKILL.md, MCO_SYSTEM_PROMPT_FALLBACK,
-    the Drive SKILL_FILE_ID/KB_FILE_ID files, and localMcoDiagnosis in Dashboard.html
+SINGLE SOURCE (run this — it is the guard, not a suggestion)
+  • python3 tools/check_single_source.py     ← must pass; also runs sync_skill.py --check
+  • edited skills/mco-creative-explainer/SKILL.md? run `python3 tools/sync_skill.py` first,
+    or the prompt the model receives is the OLD prose.
+  • MCO thresholds live ONLY in MCO_RULES, metric meanings ONLY in METRICS, the format mapping
+    ONLY in MCO_GROUP_MAP_GS — all reach Dashboard.html through getConfig(). Never add a literal.
 
 SECRETS
   • No API keys or client secrets in source — Script Properties only (CLAUDE_API_KEY,

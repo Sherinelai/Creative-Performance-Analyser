@@ -10,19 +10,29 @@ description: >-
 ---
 
 <!--
-PROVENANCE — read this before trusting the content below.
+PROVENANCE — this file is the single source of truth for the app's MCO knowledge.
 
-Extracted verbatim from `MCO_SYSTEM_PROMPT_FALLBACK` in appscript/Code.js (the in-source fallback
-copy) on 2026-07-27. The RUNTIME source of truth is two Google Drive files, loaded by
-`getSkillContent()` via the Script Properties `SKILL_FILE_ID` and `KB_FILE_ID`:
+Origin: extracted from `MCO_SYSTEM_PROMPT_FALLBACK` in appscript/Code.js on 2026-07-27, then
+VERIFIED byte-identical (modulo one trailing newline) against the Google Drive original:
+  https://drive.google.com/file/d/1w_S9VlNvq_t5tQ50rq8DsiSzU-0DUhyK/view
+No drift existed. That Drive file is itself the merged skill + knowledge base, so there was only
+ever one document.
 
-  SKILL.md                 https://drive.google.com/file/d/1w_S9VlNvq_t5tQ50rq8DsiSzU-0DUhyK/view
-  mco-knowledge-base.md    (id in the KB_FILE_ID script property)
+Since then this file is authoritative and the app no longer reads Drive at runtime — the old
+Script Properties SKILL_FILE_ID / KB_FILE_ID are unused. Edit this file, then run
+`python3 tools/sync_skill.py` to recompile it into appscript/Code.js (MCO_SKILL), then
+`clasp push -f`. Re-upload to Drive only if humans read the Drive copy — it is no longer wired
+to anything.
 
-Those Drive files are NOT link-public, so this copy could not be diffed against them. If the Drive
-versions have drifted, they win at runtime and this file is stale — re-export them over this file and
-note it in LEARNINGS.d. Target state for the re-architecture: this repo file becomes the single
-source of truth and Drive is fed from it (or dropped entirely).
+DIVERGENCE FROM THE DRIVE ORIGINAL (deliberate):
+  2026-07-27 — the WCS lifecycle table's Exploring row said "<25K impressions AND <7 days live",
+  which contradicts both "Optimized requires BOTH" (§3) and §3's own "In Practice" line
+  ("<25K impressions or <7 days"). Changed to OR, with the reasoning inline in §4. If a domain
+  owner decides AND was intended, revert §4/§9/§11 together AND change
+  mcoLifecycleState() in Dashboard.html plus MCO_RULES.lifecycle_states in Code.js.
+
+NUMBERS: every threshold in this prose is mirrored as data in MCO_RULES (appscript/Code.js).
+tools/sync_skill.py warns when a MCO_RULES number no longer appears here. Change both together.
 -->
 
 # MCO Creative Explainer — Complete Reference
@@ -142,8 +152,16 @@ When a bid is won by an "optimized" creative, 5-10% of the time (max 35%) the op
 
 | State | Criteria | Behavior |
 |-------|----------|----------|
-| **Exploring** | <25K impressions AND <7 days live | Protected from Auto-Pauser. Receives forced impressions via WCS. |
-| **Optimizing** | ≥25K impressions AND ≥7 days live | Normal MCO competition. Eligible for Auto-Pauser. |
+| **Exploring** | <25K impressions **OR** <7 days live | Protected from Auto-Pauser. Receives forced impressions via WCS. |
+| **Optimizing** | ≥25K impressions **AND** ≥7 days live | Normal MCO competition. Eligible for Auto-Pauser. |
+
+> **The two states are complements, so the Exploring row is an OR.** "Optimized" requires
+> *both* counts (see §3), therefore failing *either* one leaves the creative exploring and
+> WCS-protected — which is what §3 "In Practice" already says. An earlier revision of this
+> table wrote the Exploring row as an AND, which left a creative with 30K impressions but
+> only 3 days live in neither state; code implementing that reading treated it as
+> *optimizing*, i.e. eligible for the Auto-Pauser, contradicting the Auto-Pauser's own
+> criteria. Corrected 2026-07-27.
 
 - All new creatives start as "exploring"
 - For net-new apps (all exploring), no substitutions until first creative becomes "optimizing"
@@ -231,7 +249,7 @@ LXA only eligible on VX exchange. Filtered out in eligibility step on other exch
 ## 10. Diagnosis Logic
 
 1. **Free Floating** → `free_floating_random` (recommend adopting MCO)
-2. **<25K imps AND <7 days** → exploring (`wcs_protected` or `throttle_queued`)
+2. **<25K imps OR <7 days** (i.e. not yet "Optimized") → exploring (`wcs_protected` or `throttle_queued`)
 3. **Paused**: compare ITI vs group, check spend share <5%, selection prob <10%
 4. **Spending + highest ITI** → `winning_highest_iti`; otherwise check eligibility
 5. **Not spending + lower ITI** → `losing_iti_competition`
@@ -247,7 +265,7 @@ LXA only eligible on VX exchange. Filtered out in eligibility step on other exch
 | **ITI** | Impression-to-Install rate (30-day window) |
 | **WCS** | Winner Candidate Substitution |
 | **Auto-Pauser** | Pauses underperforming optimized creatives |
-| **Exploring** | <25K imps AND <7 days, protected |
+| **Exploring** | <25K imps OR <7 days (not yet Optimized), protected |
 | **Optimizing** | ≥25K imps AND ≥7 days, normal competition |
 | **Free Floating** | Non-MCO, random selection |
 | **Inventory Format** | e.g. phone-portrait-vast-30s |

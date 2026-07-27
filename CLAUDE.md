@@ -96,6 +96,14 @@ Never re-declare either in `Dashboard.html`; read them from `CFG` / `mcoRules()`
 | Reverse (group → format bases, for filtering) | `mcoGroupToBases()` — derived from the map | — |
 | The list of groups | `KEY_FORMATS` | `ALL_DN` (format multi-select) |
 | Every MCO threshold + the 13 diagnosis codes | `MCO_RULES` | `CFG.mcoRules`, via `mcoRules()` |
+| What each metric means + which way is good | `METRICS` | `CFG.metrics`, via `metricDef()` / `metricLabel()` / `isCostMetric()` |
+| Which metric a campaign type is judged on | `PRIMARY_METRIC_BY_CAMPAIGN_TYPE` | `primaryMetricKey()` |
+| Analysis thresholds (SOW, freshness, …) | `THRESHOLDS` | `CFG.thresholds`, via `TH('NAME')` |
+
+**The guard:** `python3 tools/check_single_source.py` fails if any of those duplicates comes back —
+it greps for the exact shapes they had (a mapping literal in `Dashboard.html`, a `25000`, a
+`flipCols` list, a second `api.anthropic.com` call site, a credential in source) and also runs
+`sync_skill.py --check`. Run it before `clasp push`; add a rule whenever you collapse a new duplicate.
 
 `MCO_RULES` is the one place holding 25,000 impressions / 7 days / 5% spend share / 10% selection
 probability / 6 throttle slots / 46.5% overlap. It flows to **all three** consumers: the Claude system
@@ -134,11 +142,17 @@ Model and request shape (`CLAUDE_MODEL` / `CLAUDE_MAX_TOKENS` at the top of the 
 - `stop_reason` is checked: `refusal` and `max_tokens` raise distinct errors instead of surfacing as a
   generic "unavailable".
 
-The system prompt is `getSkillContent()` = `MCO_SKILL` + `mcoRulesPromptBlock()`. **`MCO_SKILL` is
-generated** from `skills/mco-creative-explainer/SKILL.md` by `python3 tools/sync_skill.py` (which also
-warns if a `MCO_RULES` number no longer appears in the prose). Runtime Drive loading is **gone** —
-Script Properties `SKILL_FILE_ID` / `KB_FILE_ID` are unused and can be deleted. Editing the skill =
-edit the `.md`, run the sync script, `clasp push -f`.
+The system prompt is `getSkillContent()` = `MCO_SKILL` + `mcoRulesPromptBlock()` +
+`metricsPromptBlock()` — so every number and every "lower is better" the model sees is *rendered from*
+the same objects the client reads. **`MCO_SKILL` is generated** from
+`skills/mco-creative-explainer/SKILL.md` by `python3 tools/sync_skill.py` (which also warns if a
+`MCO_RULES` number no longer appears in the prose). Runtime Drive loading is **gone** — Script
+Properties `SKILL_FILE_ID` / `KB_FILE_ID` are unused and can be deleted. Editing the skill = edit the
+`.md`, run the sync script, `clasp push -f`.
+
+The repo `SKILL.md` was verified byte-identical to the Drive original on 2026-07-27 (that Drive file
+*is* the merged skill + knowledge base — there was only ever one document). It has since diverged by
+one deliberate correction, recorded in the file's provenance header.
 
 Deterministic fallbacks in the front end reimplement the same reasoning in plain JS for when the API
 is unavailable: `localMcoDiagnosis`, `localFormatSummary`, `localVideoSummary`,
