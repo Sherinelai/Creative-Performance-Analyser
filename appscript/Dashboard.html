@@ -406,6 +406,21 @@ function metricLabelWithDirection(key){
   return m.label+' ('+(m.direction==='lower_is_better'?'lower=better':'higher=better')+')';
 }
 
+/**
+ * Can this campaign serve on this MCO Inventory Group's device class?
+ * Device classes come from CFG.formatDevice (FORMAT_DEVICE in Code.js); the campaign's targeting is
+ * R.deviceTargeting ('Phone' | 'Tablet' | 'All'). A phone-only campaign has no gap just because it
+ * has no tablet creatives, so those rows are not worth showing at all.
+ */
+function formatServesDevice(mcoGroup){
+  var map=CFG&&CFG.formatDevice;
+  var dev=map?map[mcoGroup]:null;
+  if(!dev||dev==='any')return true;                      // unknown or device-agnostic
+  var t=R&&R.deviceTargeting;
+  if(!t||t==='All')return true;                          // unknown targeting: show everything
+  return dev===String(t).toLowerCase();
+}
+
 /** True when a lower value is better — the only place cost-vs-return is decided client-side. */
 function isCostMetric(key){ var m=metricDef(key); return !!(m&&m.direction==='lower_is_better'); }
 
@@ -884,6 +899,7 @@ function renderDashboard(){
   var mcoColor=mcoLabel.indexOf('MCO')>=0?'var(--peri)':'var(--rd)';
   var metaItems=[
     {l:'Type',v:campType},{l:'Model',v:optModel},{l:'Selection',v:mcoLabel,c:mcoColor},
+    {l:'Devices',v:(R.deviceTargeting||'—')},
     {l:'Target Event',v:tgtEvt},{l:'Goal 2',v:g2},{l:'VT',v:vtCap},{l:'Viewclick',v:vcTol}
   ];
   metaItems.forEach(function(f){
@@ -1255,6 +1271,7 @@ function fetchDiagnosisFor(cidIn){
       roas:cp?cp.roas:null,rpa:cp?cp.rpa:null,rpi:cp?cp.rpi:null,
       paused_by:entry.changed_by||'unknown',is_cpa_campaign:cp?cp.is_cpa_campaign:false,
       creative_selection_model:R.mcoEnabled?'MCO':'free_floating',question_type:'why_paused',
+      device_targeting:R.deviceTargeting||'unknown',
       campaign_spend_share:cp&&totalSpend>0?((cp.spend||0)/totalSpend*100).toFixed(1)+'%':'N/A',
       format_spend_share:fmtSpendShare!=null?fmtSpendShare.toFixed(1)+'%':'N/A',
       active_same_format:activeInGroup,
@@ -1372,6 +1389,7 @@ function requestAiInsights(){
   var trendPayload={
     campaign_type:R.campType,campaign_label:R.campTypeLabel,
     is_cpa:R._isCpa,mco_enabled:R.mcoEnabled,optimization_state:R.optimizationState,
+    device_targeting:R.deviceTargeting||'unknown',
     formatMetrics:fmForAI,
     dailyFormatMetrics:(R.dailyFormatMetrics||[]).slice(0,200),
     typeBreakdown:R.typeBreakdown
@@ -2296,7 +2314,9 @@ function varBadge(v){
 }
 function renderMergedTable(){
   var now=new Date(),groups={};
-  ALL_DN.forEach(function(dn){groups[dn]={name:dn,creatives:[],spend:0,active:0,paused:0,newestDays:9999,hasStale:false};});
+  // Seed a row per format the campaign can actually serve on. Formats it cannot target are not
+  // gaps — a phone-only campaign showing five empty Tablet rows reads as "you're missing these".
+  ALL_DN.filter(formatServesDevice).forEach(function(dn){groups[dn]={name:dn,creatives:[],spend:0,active:0,paused:0,newestDays:9999,hasStale:false};});
   var isPrimRpa=!!(R&&R._isCpa);
 
   // Campaign averages from SQL (weighted, not creative-level average)

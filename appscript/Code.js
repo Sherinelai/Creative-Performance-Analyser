@@ -152,6 +152,33 @@ var METRICS = {
   ipm:     { label: 'IPM',     direction: 'higher_is_better', definition: 'Installs Per Mille = ITI x 1000' }
 };
 
+// ═══════════════════════════════════════════════════════════
+// DEVICE TARGETING — which device class each MCO Inventory Group can serve on
+//
+// A campaign targets Phone, Tablet, or All (pinpoint.public.campaigns_targeted_devices — see
+// buildDeviceTargetingSQL). A phone-only campaign having no tablet creatives is NOT a gap, so the
+// format table must not seed empty Tablet rows for it and the AI must not recommend tablet
+// creatives for it. Native and MRECT serve on either, so they are 'any'.
+// Single source: the client reads this through getConfig() (CFG.formatDevice).
+// ═══════════════════════════════════════════════════════════
+var FORMAT_DEVICE = {
+  'Phone Portrait VAST':  'phone', 'Phone Landscape VAST':  'phone',
+  'Phone Portrait HTML':  'phone', 'Phone Landscape HTML':  'phone',
+  'Phone Banner':         'phone',
+  'Tablet Portrait VAST': 'tablet','Tablet Landscape VAST': 'tablet',
+  'Tablet Portrait HTML': 'tablet','Tablet Landscape HTML': 'tablet',
+  'Tablet Banner':        'tablet',
+  'Native VAST': 'any', 'Native Static': 'any', 'MRECT VAST': 'any', 'MRECT Static': 'any'
+};
+
+/** True when a campaign targeting `targeting` ('Phone'|'Tablet'|'All'|null) can serve this group. */
+function formatServesDevice(mcoGroup, targeting) {
+  var dev = FORMAT_DEVICE[mcoGroup];
+  if (!dev || dev === 'any') return true;             // unknown or device-agnostic: always show
+  if (!targeting || targeting === 'All') return true; // unknown targeting: show everything
+  return dev === String(targeting).toLowerCase();
+}
+
 /** Which metric a campaign type is judged on. Used by _getPrimaryMetric and by the client. */
 var PRIMARY_METRIC_BY_CAMPAIGN_TYPE = { ua_cpr: 'roas', re: 'roas', ua_cpa: 'rpa', ua_cpi: 'rpi' };
 
@@ -1088,6 +1115,7 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
       targetEvt: buildTargetEventSQL(campaignId),
       pauseLog:  buildPauseLogSQL(campaignId, lookbackDays),
       unassigned:buildUnassignedSQL(campaignId, lookbackDays),
+      deviceTgt: buildDeviceTargetingSQL(campaignId),
       impInst:   buildImpressionInstallSQL(campaignId, lookbackDays),
       queuing:   buildQueueingSQL(campaignId)   || 'SELECT 1 AS _skip',
       exploring: buildExploringSQL(campaignId)  || 'SELECT 1 AS _skip',
@@ -1490,6 +1518,15 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
         Logger.log('Added ' + added + ' metric-less queued creative rows');
       }
     } catch(e) { Logger.log('Lifecycle/queuing parse failed: ' + e.message); }
+
+    // Device targeting: 'Phone' | 'Tablet' | 'All'. Drives which format rows are worth showing and
+    // stops the AI recommending creatives for a device the campaign cannot serve.
+    result.deviceTargeting = null;
+    try {
+      var dtRows = b2.deviceTgt || [];
+      if (dtRows.length) result.deviceTargeting = dtRows[0].device_targeting || null;
+      Logger.log('Device targeting: ' + result.deviceTargeting);
+    } catch(e) { Logger.log('Device targeting parse failed: ' + e.message); }
 
     // Parse target event name
     result.targetEventName = null;
@@ -2261,6 +2298,33 @@ function buildUnassignedSQL(campaignId, lookbackDays) {
   ].join('\n');
 }
 
+/**
+ * What device class this campaign targets: 'Phone', 'Tablet' or 'All'.
+ *
+ * pinpoint.public.campaigns_targeted_devices holds one row per targeted device; more than one row
+ * means All, otherwise device ids 3 and 5 are the tablet ones. (Live id distribution: 1, 2, 3, 4, 5.)
+ * Simplified from the supplied Looker SQL by dropping the analytics.trimmed_daily join — the table
+ * already carries campaign_id, so the join only added time. Verified: 41535/77022/78934 = Phone,
+ * 64417/69090 = All, in ~4s.
+ */
+function buildDeviceTargetingSQL(campaignId) {
+  return [
+    "WITH d AS (",
+    "  SELECT campaign_id, COUNT(targeted_device_id) AS device_count",
+    "  FROM pinpoint.public.campaigns_targeted_devices GROUP BY 1",
+    ")",
+    "SELECT cd.campaign_id AS campaign_id,",
+    "  CASE WHEN d.device_count > 1 THEN 'All'",
+    "       WHEN cd.targeted_device_id IN (3,5) THEN 'Tablet'",
+    "       ELSE 'Phone' END AS device_targeting",
+    "FROM pinpoint.public.campaigns_targeted_devices cd",
+    "LEFT JOIN d ON cd.campaign_id = d.campaign_id",
+    "WHERE cd.campaign_id = " + campaignId,
+    "GROUP BY 1, 2",
+    "LIMIT 5",
+  ].join('\n');
+}
+
 function buildTypeBreakdownSQL(campaignId, lookbackDays) {
   return [
     "SELECT",
@@ -2643,6 +2707,7 @@ function getConfig() {
   return {
     thresholds: THRESHOLDS,
     keyFormats: KEY_FORMATS,
+    formatDevice: FORMAT_DEVICE,
     defaultLookback: DEFAULT_LOOKBACK_DAYS,
     mcoGroupMap: MCO_GROUP_MAP_GS,
     mcoRules: MCO_RULES,
@@ -3162,6 +3227,8 @@ function diagnoseMcoCreative(creativeData) {
     '6. Missing the data you would need → insufficient_data with confidence "low"',
     '',
     '`format` must be the MCO Inventory Group name (e.g. "Phone Portrait VAST"), not the raw inventory_format.',
+    '`device_targeting` is what the campaign can serve on ("Phone", "Tablet" or "All"). Never suggest',
+    'creatives for a device class it does not target — a Phone campaign with no Tablet creatives is correct.',
     'Lead with the reason. Cite specific numbers from the data. Two to three sentences of explanation, no more.',
   ].join('\n');
 
@@ -3197,6 +3264,10 @@ function summarizeFormatTrends(trendData) {
     '- Reference specific numbers (spend %, ROAS values, RPI).',
     '- Flag formats with declining ROAS or disproportionate spend vs performance.',
     '- Remember format-level spend is decided by ML pricing, not by MCO — do not attribute a spend shift to MCO.',
+    '- `device_targeting` is what the campaign can serve on: "Phone", "Tablet" or "All". NEVER suggest',
+    '  creatives for a device class it does not target, and never call a missing format a gap when the',
+    '  campaign cannot serve that device — e.g. a Phone campaign with no Tablet creatives is correct,',
+    '  not incomplete. Native and MRECT formats serve on either device.',
     '- Keep it actionable for a Performance Strategist.',
   ].join('\n');
 

@@ -63,6 +63,7 @@ const wanted = {
   impInst: `buildImpressionInstallSQL(${campaignId}, ${lookbackDays})`,
   pauseLog: `buildPauseLogSQL(${campaignId}, ${lookbackDays})`,
   unassigned: `buildUnassignedSQL(${campaignId}, ${lookbackDays})`,
+  deviceTgt: `buildDeviceTargetingSQL(${campaignId})`,
 };
 
 const out = {};
