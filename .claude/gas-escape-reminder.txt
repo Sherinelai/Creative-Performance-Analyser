@@ -1,7 +1,0 @@
-⚠️ GAS escape-sequence check before `clasp push` (re-dashboard.js changed in the last commit).
-In the getDashboardHtml() backtick template, GAS processes escapes before the browser sees them — verify:
-  • \' renders as '  and  \\ renders as \  → silently breaks string delimiters / regex (browser SyntaxError)
-  • ${...} inside // or /* */ comments is STILL evaluated by GAS; a multi-line blob there corrupts the script (Uncaught SyntaxError: Unexpected end of input)
-  • \r\n becomes a literal CR/LF — use '\\r\\n' or String.fromCharCode(13, 10)
-Prefer DOM methods (createElement / .onclick = function(){...}) over innerHTML string concatenation to avoid all of this.
-And remember: `clasp push` only updates HEAD — redeploy the prod /exec deployment afterwards, or prod serves stale code.
