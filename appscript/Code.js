@@ -158,7 +158,14 @@ var METRICS = {
 // A campaign targets Phone, Tablet, or All (pinpoint.public.campaigns_targeted_devices — see
 // buildDeviceTargetingSQL). A phone-only campaign having no tablet creatives is NOT a gap, so the
 // format table must not seed empty Tablet rows for it and the AI must not recommend tablet
-// creatives for it. Native and MRECT serve on either, so they are 'any'.
+// creatives for it.
+//
+// Native and MRECT are PHONE formats. Measured across every enabled creative: of the Native/MRECT
+// creatives, 49.6% sit on Phone campaigns and 50.0% on All campaigns — only **0.4%** (528 creatives,
+// 221 campaigns) on Tablet-only ones. Classifying them 'phone' is safe because this map only decides
+// which EMPTY rows to seed: a format that actually has creatives always gets a row anyway (the
+// creative loop creates the group on demand), so the rare tablet campaign running Native still sees it.
+//
 // Single source: the client reads this through getConfig() (CFG.formatDevice).
 // ═══════════════════════════════════════════════════════════
 var FORMAT_DEVICE = {
@@ -168,7 +175,8 @@ var FORMAT_DEVICE = {
   'Tablet Portrait VAST': 'tablet','Tablet Landscape VAST': 'tablet',
   'Tablet Portrait HTML': 'tablet','Tablet Landscape HTML': 'tablet',
   'Tablet Banner':        'tablet',
-  'Native VAST': 'any', 'Native Static': 'any', 'MRECT VAST': 'any', 'MRECT Static': 'any'
+  'Native VAST':          'phone', 'Native Static':        'phone',
+  'MRECT VAST':           'phone', 'MRECT Static':         'phone'
 };
 
 /** True when a campaign targeting `targeting` ('Phone'|'Tablet'|'All'|null) can serve this group. */
@@ -3229,6 +3237,7 @@ function diagnoseMcoCreative(creativeData) {
     '`format` must be the MCO Inventory Group name (e.g. "Phone Portrait VAST"), not the raw inventory_format.',
     '`device_targeting` is what the campaign can serve on ("Phone", "Tablet" or "All"). Never suggest',
     'creatives for a device class it does not target — a Phone campaign with no Tablet creatives is correct.',
+    'Native and MRECT are phone formats.',
     'Lead with the reason. Cite specific numbers from the data. Two to three sentences of explanation, no more.',
   ].join('\n');
 
@@ -3267,7 +3276,7 @@ function summarizeFormatTrends(trendData) {
     '- `device_targeting` is what the campaign can serve on: "Phone", "Tablet" or "All". NEVER suggest',
     '  creatives for a device class it does not target, and never call a missing format a gap when the',
     '  campaign cannot serve that device — e.g. a Phone campaign with no Tablet creatives is correct,',
-    '  not incomplete. Native and MRECT formats serve on either device.',
+    '  not incomplete. Native and MRECT are phone formats.',
     '- Keep it actionable for a Performance Strategist.',
   ].join('\n');
 
