@@ -1356,6 +1356,25 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
           cp.is_queuing = (cp.lifecycle_state === 'queuing'); // kept as an alias for the UI
         });
       }
+
+      // ── The queuing blind spot (verified on campaign 41535: 16 queuing, only 3 displayed) ──
+      // A queuing creative has current_status='excluded' — it is NOT being served, so it has no
+      // rows in cstudio_analytics_daily_v1. Both the perf and the inventory query are driven by
+      // that table over the lookback window, so a queuing creative usually cannot appear in
+      // creativePerf at all. exploring/optimizing creatives ARE serving, so they show up 100%.
+      // Net effect: counting states off creativePerf systematically undercounts the queue —
+      // exactly the state a strategist most needs to see. Publish the true counts alongside.
+      var displayedIn = function(set) {
+        var n = 0;
+        (result.creativePerf || []).forEach(function(cp) { if (set[String(cp.creative_id)]) n++; });
+        return n;
+      };
+      result.lifecycleCounts = {
+        queuing:    { total: Object.keys(queuingSet).length,    displayed: displayedIn(queuingSet) },
+        exploring:  { total: Object.keys(exploringSet).length,  displayed: displayedIn(exploringSet) },
+        optimizing: { total: Object.keys(optimizingSet).length, displayed: displayedIn(optimizingSet) }
+      };
+      Logger.log('Lifecycle counts (total/displayed): ' + JSON.stringify(result.lifecycleCounts));
     } catch(e) { Logger.log('Lifecycle/queuing parse failed: ' + e.message); }
 
     // Parse target event name
@@ -1563,6 +1582,12 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
 
         // 1. Lifecycle-based recs (MCO only — Free-Floating has no WCS/throttle)
         var exploringCnt = 0, queuingCnt = 0, optimizingCnt = 0, zeroSpendLive = 0;
+        // Counted off creativePerf, so these are the DISPLAYED counts. For queuing that is an
+        // undercount by construction (see result.lifecycleCounts): a queued creative isn't being
+        // served, so it has no analytics rows and usually isn't in creativePerf at all. The
+        // recommendation below reports the true queue size from the PDT.
+        var queuingTrue = (result.lifecycleCounts && result.lifecycleCounts.queuing)
+          ? result.lifecycleCounts.queuing.total : null;
         (result.creativePerf || []).forEach(function(c) {
           if (c.status !== 'active') return;
           // One creative, one state — see MCO_RULES.creative_states.
@@ -1573,10 +1598,14 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
         });
 
         if (mcoEnabled) {
-          if (queuingCnt > 0) {
+          // Use the true queue size from the PDT, not the displayed count.
+          var qShow = (queuingTrue != null) ? queuingTrue : queuingCnt;
+          var qHidden = (queuingTrue != null) ? (queuingTrue - queuingCnt) : 0;
+          if (qShow > 0) {
             recs.push({
               level: 'info',
-              title: queuingCnt + ' creative' + (queuingCnt > 1 ? 's' : '') + ' in throttle queue',
+              title: qShow + ' creative' + (qShow > 1 ? 's' : '') + ' in throttle queue'
+                + (qHidden > 0 ? ' (' + qHidden + ' not in the table — a queued creative isn\'t served, so it has no metrics in this window)' : ''),
               body: 'These creatives are enabled but waiting for WCS exploration capacity. They\'ll start receiving impressions once capacity opens. This is normal for campaigns with many new uploads. If budgets were recently cut, queue capacity may have shrunk.'
             });
           }
@@ -1610,7 +1639,9 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
         }
 
         // Zero-spend active creatives (both MCO and Free-Floating)
-        if (zeroSpendLive > 0 && !queuingCnt) {
+        // Suppress the zero-spend warning when the queue explains it — use the TRUE queue size,
+        // since the queued creatives are precisely the ones missing from the table.
+        if (zeroSpendLive > 0 && !(queuingTrue != null ? queuingTrue : queuingCnt)) {
           var zeroMsg = mcoEnabled
             ? 'These creatives are enabled but received no spend. They may be losing ITI competition in MCO. Check if they\'re in the throttle queue or have eligibility mismatches.'
             : 'These creatives are enabled but received no spend. In Free-Floating mode, this may indicate eligibility mismatches (wrong orientation/ad type for available inventory).';
