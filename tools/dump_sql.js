@@ -15,6 +15,7 @@ const vm = require('vm');
 
 const campaignId = process.argv[2] || '41535';
 const lookbackDays = parseInt(process.argv[3] || '30', 10);
+const appId = process.argv[4] || '0';
 
 const CREATIVE_FORMAT_PDT = 'looker.lr_rbd0d1785124923808_cstudio__creative_format';
 const QUEUE_PDT = 'looker.lr_rbec01785126641966_queue_creative_statistics';
@@ -48,6 +49,10 @@ vm.runInContext(
 
 const wanted = {
   perf: `buildCreativeLevelPerfSQL(${campaignId}, ${lookbackDays})`,
+  config: `buildCampaignConfigSQL(${appId})`,
+  typeBreak: `buildTypeBreakdownSQL(${campaignId}, ${lookbackDays})`,
+  targetEvt: `buildTargetEventSQL(${campaignId})`,
+
   inventory: `buildCreativeInventorySQL(${campaignId})`,
   queuing: `buildQueueingSQL(${campaignId})`,
   exploring: `buildExploringSQL(${campaignId})`,

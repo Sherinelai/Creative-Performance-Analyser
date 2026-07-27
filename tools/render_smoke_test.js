@@ -87,6 +87,25 @@ try {
 }
 
 let failed = false;
+
+// --real: drive the render chain with a REAL fetchCreativeData response (written by
+// tools/run_pipeline.js). Demo fixtures can't reproduce production data shapes — null mco_group,
+// metric-less rows, unassigned statusLog entries — so this is the mode that catches a client
+// exception thrown only by real data.
+if (process.argv.includes('--real')) {
+  const real = JSON.parse(fs.readFileSync('/tmp/result.json', 'utf8'));
+  ctx.R = real;
+  try {
+    vm.runInContext('R = globalThis.R || R; onData(R);', ctx);
+    if (errors.length) throw new Error(errors.join('\n'));
+    console.log('PASS  render chain on REAL data');
+  } catch (e) {
+    console.error('FAIL  render chain on REAL data:\n' + (e.stack || e) + '\n');
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 for (const type of ['cpr', 'cpa']) {
   errors.length = 0;
   try {

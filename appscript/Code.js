@@ -1054,14 +1054,33 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
     //
     // Nothing below may depend on a query result to BUILD another query's SQL. If that ever
     // becomes necessary, add a second batch rather than making this one sequential.
-    Logger.log('Running ' + 13 + ' queries in one parallel batch...');
+    // WAVE 1 — the creative-performance query, ON ITS OWN.
+    //
+    // Everything on the dashboard that is a number comes from this one query: spend, revenue,
+    // ROAS, RPI, RPA, the CIs. When it returns nothing, runSQLParallel swallows the failure into
+    // [] and the page renders complete but empty — verified with tools/run_pipeline.js: an empty
+    // perf gives totalSpend 0 and null roas/rpi/rpa on every row, which is exactly the "all the
+    // numbers are gone" report.
+    //
+    // It is also the slowest and least predictable query — measured 40s, 94s and once over 120s
+    // on the same campaign within one day. Running it alongside the other twelve (as it briefly
+    // did) made it compete for the connection and lose. So: its own wave, no contention, and one
+    // retry before we trust an empty answer.
     var t1 = new Date().getTime();
+    var perfSQL = buildCreativeLevelPerfSQL(campaignId, lookbackDays);
+    var perfData = (runSQLParallel({ perf: perfSQL }).perf) || [];
+    if (!perfData.length) {
+      Logger.log('Perf returned 0 rows — retrying once (it is slow and can time out)');
+      perfData = (runSQLParallel({ perf: perfSQL }).perf) || [];
+    }
+    Logger.log('Perf: ' + perfData.length + ' rows in ' + Math.round((new Date().getTime()-t1)/1000) + 's');
+
+    // WAVE 2 — everything else, all in parallel. None of these depend on wave 1's rows; they are
+    // in a second wave only so wave 1 runs uncontended.
+    var t2 = new Date().getTime();
     var allSQLs = {
-      // was batch 1
-      perf:      buildCreativeLevelPerfSQL(campaignId, lookbackDays),
       inventory: buildCreativeInventorySQL(campaignId),
       config:    buildCampaignConfigSQL(appId),
-      // was batch 2
       dailyFmt:  buildDailyFormatMetricsSQL(campaignId, lookbackDays),
       typeBreak: buildTypeBreakdownSQL(campaignId, lookbackDays),
       meta:      buildCampaignMetaSQL(campaignId),
@@ -1076,14 +1095,31 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
       // campBasic/campCohort REMOVED — computed from merged[] for perfect consistency + speed
     };
     var all = runSQLParallel(allSQLs);
-    Logger.log('All queries done in ' + Math.round((new Date().getTime()-t1)/1000) + 's');
+    Logger.log('Other queries done in ' + Math.round((new Date().getTime()-t2)/1000) + 's');
+    all.perf = perfData;
     // b1/b2 alias the same result so the parsing below is untouched (keys don't collide).
     var b1 = all, b2 = all;
 
-    var perfData  = b1.perf      || [];
+    // Never render a page full of zeros. Inventory rows with no perf rows means the perf query
+    // failed or timed out, not that the campaign was idle — the two read different tables, but a
+    // campaign with creatives in the window and no performance data at all is anomalous enough to
+    // report rather than draw.
+    if (!perfData.length && (all.inventory || []).length > 0) {
+      return { error: 'The creative performance query returned no rows for campaign ' + campaignId +
+        ', although the campaign has ' + all.inventory.length + ' creatives in this window. That query ' +
+        'takes 40-90s and can time out. Please try again; if it keeps failing, shorten the lookback window.' };
+    }
+
     var inventory = b1.inventory || [];
     var cfgRows   = b1.config    || [];
     Logger.log('Perf: ' + perfData.length + ' | Inventory: ' + inventory.length + ' | Config: ' + cfgRows.length);
+    if (!cfgRows.length) {
+      // buildCampaignConfigSQL currently fails outright: it selects apps.bundle_id, which no
+      // longer exists in pinpoint.public.apps ("Column 'apps.bundle_id' cannot be resolved").
+      // Survivable — MCO status comes from the batch-2 meta query and campType from the name —
+      // but it silently costs the app name and the KPI target. Fix the column list.
+      Logger.log('Config query returned nothing (check apps.bundle_id — dropped upstream)');
+    }
 
     // Parse config
     var mcoEnabled = false, campaignType = null, optState = null;
