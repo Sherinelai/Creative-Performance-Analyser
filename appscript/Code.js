@@ -155,6 +155,29 @@ var METRICS = {
 /** Which metric a campaign type is judged on. Used by _getPrimaryMetric and by the client. */
 var PRIMARY_METRIC_BY_CAMPAIGN_TYPE = { ua_cpr: 'roas', re: 'roas', ua_cpa: 'rpa', ua_cpi: 'rpi' };
 
+/**
+ * The primary metric — ONE decision, goals first.
+ *
+ * campType comes from campaign_types.name and falls back to guessing from the campaign NAME.
+ * Campaign 78934 shows why that can't be trusted for this: campaign_type is 'brand' and the name
+ * carries no cpa/roas token, so detectTypeFromName defaults it to 'ua_cpr' (ROAS) — while
+ * goal_2='rpa' and optimization_state='cpa' say the campaign is judged on RPA. The goals and the
+ * optimization state state the actual target, so they win and campType is only the fallback.
+ *
+ * Everything downstream must read this one value: the KPI tile, the table header, the AI payload,
+ * and classifyCreativePerformance_. Deriving it twice is what put "7D ROAS" above RPA numbers.
+ */
+function resolvePrimaryMetric_(campType, optimizationState, creatives) {
+  var s = String(optimizationState || '');
+  var c0 = (creatives && creatives.length) ? creatives[0] : null;
+  if (c0) s += ' ' + String(c0.campaign_goal_1 || '') + ' ' + String(c0.campaign_goal_2 || '');
+  s = s.toLowerCase();
+  if (s.indexOf('rpa') >= 0 || s.indexOf('cpa') >= 0) return 'rpa';
+  if (s.indexOf('roas') >= 0 || s.indexOf('cpr') >= 0) return 'roas';
+  if (s.indexOf('rpi') >= 0 || s.indexOf('cpi') >= 0) return 'rpi';
+  return PRIMARY_METRIC_BY_CAMPAIGN_TYPE[campType] || 'rpi';
+}
+
 // ═══════════════════════════════════════════════════════════
 // PERFORMANCE CLASSIFICATION — SINGLE SOURCE for ★ Top / ↑ Campaign / ↑ Format / ⚠ Poor
 //
@@ -1552,7 +1575,12 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
     //   Low var CI (variance==='high') + RPI > campaign avg + bad main metric
     // Protect sole-active creatives in their format group (recommend adding more instead)
     try {
-      var isCpa = (result.campType === 'ua_cpa') || (result.optimizationState || '').indexOf('cpa') >= 0 || (result.optimizationState || '').indexOf('rpa') >= 0;
+      // One decision for the whole response — see resolvePrimaryMetric_. This replaces two
+      // different formulas (this one used campType + optimizationState; the client used the goal
+      // fields), which disagreed on campaigns whose campaign_type is uninformative.
+      result.primaryMetric = resolvePrimaryMetric_(result.campType, result.optimizationState, result.creativePerf);
+      result._isCpa = (result.primaryMetric === 'rpa');
+      var isCpa = result._isCpa;
       // Use campaignPerf weighted values (SAME numbers shown in KPI cards and Campaign table row)
       // so "below campaign average" in the rec matches what the user sees on screen.
       var campAvgRoas = (result.campaignPerf && result.campaignPerf.roas_d7 != null) ? result.campaignPerf.roas_d7 : null;

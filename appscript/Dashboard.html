@@ -409,8 +409,14 @@ function metricLabelWithDirection(key){
 /** True when a lower value is better — the only place cost-vs-return is decided client-side. */
 function isCostMetric(key){ var m=metricDef(key); return !!(m&&m.direction==='lower_is_better'); }
 
-/** The metric this campaign type is judged on, from PRIMARY_METRIC_BY_CAMPAIGN_TYPE. */
+/**
+ * The metric this campaign is judged on. The SERVER decides it (resolvePrimaryMetric_ in
+ * Code.js: goals and optimization_state first, campaign type only as a fallback) — deriving it
+ * from campType here is what put a "7D ROAS" header over RPA numbers on campaign 78934, whose
+ * campaign_type is 'brand' and whose name carries no metric token.
+ */
 function primaryMetricKey(campType){
+  if(R&&R.primaryMetric)return R.primaryMetric;
   var t=CFG&&CFG.primaryMetricByCampaignType;
   return (t&&t[campType])?t[campType]:(R&&R._isCpa?'rpa':'roas');
 }
@@ -794,7 +800,12 @@ function onData(d){
   var goalCheck=(R.creativePerf||[]);
   var anyGoal1=goalCheck.length>0?(goalCheck[0].campaign_goal_1||'').toLowerCase():'';
   var anyGoal2=goalCheck.length>0?(goalCheck[0].campaign_goal_2||'').toLowerCase():'';
-  R._isCpa = anyGoal1.indexOf('cpa')>=0||anyGoal1.indexOf('rpa')>=0||anyGoal2.indexOf('cpa')>=0||anyGoal2.indexOf('rpa')>=0||optS.indexOf('cpa')>=0;
+  // The server decides the primary metric (resolvePrimaryMetric_ in Code.js — goals first,
+  // campaign type only as a fallback). Only derive it here when the server didn't say, which is
+  // the demo path. Deriving it in both places is what let the header say "7D ROAS" over RPA.
+  R._isCpa = R.primaryMetric
+    ? (R.primaryMetric === 'rpa')
+    : (anyGoal1.indexOf('cpa')>=0||anyGoal1.indexOf('rpa')>=0||anyGoal2.indexOf('cpa')>=0||anyGoal2.indexOf('rpa')>=0||optS.indexOf('cpa')>=0);
   // Default hidden columns by campaign type
   // CPA: hide D7 ROAS + D1 ROAS + ITI + CI (RPA is primary)
   // CPR: hide RPA + D1 ROAS + ITI + CI (D7 ROAS is primary)
