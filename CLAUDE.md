@@ -95,7 +95,7 @@ Never re-declare either in `Dashboard.html`; read them from `CFG` / `mcoRules()`
 | `inventory_format` → MCO Inventory Group | `MCO_GROUP_MAP_GS` + `toMcoGroup()` | `MCO_GROUP_MAP`, used by `invToDN()` |
 | Reverse (group → format bases, for filtering) | `mcoGroupToBases()` — derived from the map | — |
 | The list of groups | `KEY_FORMATS` | `ALL_DN` (format multi-select) |
-| Every MCO threshold + the 13 diagnosis codes | `MCO_RULES` | `CFG.mcoRules`, via `mcoRules()` |
+| Every MCO threshold, the 3 creative states, the 13 diagnosis codes | `MCO_RULES` | `CFG.mcoRules`, via `mcoRules()` |
 | What each metric means + which way is good | `METRICS` | `CFG.metrics`, via `metricDef()` / `metricLabel()` / `isCostMetric()` |
 | Which metric a campaign type is judged on | `PRIMARY_METRIC_BY_CAMPAIGN_TYPE` | `primaryMetricKey()` |
 | Analysis thresholds (SOW, freshness, …) | `THRESHOLDS` | `CFG.thresholds`, via `TH('NAME')` |
@@ -111,10 +111,27 @@ prompt (`mcoRulesPromptBlock()` appends it as authoritative), the client-side of
 (`localMcoDiagnosis` reads `mcoRules()` and bails out with `insufficient_data` if config hasn't
 arrived), and any server-side logic. Changing a threshold is a one-line edit.
 
-**Lifecycle state:** `mcoLifecycleState()` in `Dashboard.html` implements the Auto-Pauser's own
-definition — "Optimized" needs **both** ≥25K impressions **and** ≥7 days live, so failing *either*
-leaves the creative exploring/WCS-protected. The old inline `impr<25000 && dLive<7` treated a
-30K-impression / 3-day-old creative as *optimizing*, which contradicts the Auto-Pauser criteria.
+## Creative state — three states, read from the queue PDT
+
+**Authoritative, never derived.** `MCO_RULES.creative_states` holds the definition; the three SQL
+builders implement exactly these predicates over `looker.*queue_creative_statistics` (dated PDT —
+resolve via `getQueuePDT()`), joined on `creative_id`, creative and campaign both `state='enabled'`:
+
+| state | predicate | meaning |
+|---|---|---|
+| `queuing` | `queue_eligible` AND NOT `optimizing` AND `current_status='excluded'` | in the throttle waiting room, not being served |
+| `exploring` | `queue_eligible` AND NOT `optimizing` AND `current_status='included'` | being served via WCS, pre-calibration |
+| `optimizing` | NOT `queue_eligible` AND `is_currently_optimizing` | calibrated, competing on ITI, Auto-Pauser-eligible |
+
+They are **mutually exclusive** — queuing vs exploring is *only* `current_status`. `lifecycle_state`
+therefore carries all three; `is_queuing` remains only as an alias. Before this was written down,
+queuing was collapsed into `'exploring'` with `is_queuing` as a side flag, so a queuing creative
+matched both the queuing and the exploring filter and **counted twice** in the pipeline totals.
+
+The 25K-impressions / 7-days rule is what makes the *platform* flip `is_currently_optimizing` — not
+a definition to recompute. `mcoLifecycleStateProxy()` is the only place that guesses from
+impressions + age; it runs solely when the PDT returned no state for an active creative, and it can
+never return `queuing`. A creative missing from the PDT (e.g. paused) has **no** state.
 
 ## Where Claude's intelligence sits
 

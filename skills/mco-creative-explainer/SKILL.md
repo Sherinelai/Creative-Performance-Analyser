@@ -25,11 +25,19 @@ Script Properties SKILL_FILE_ID / KB_FILE_ID are unused. Edit this file, then ru
 to anything.
 
 DIVERGENCE FROM THE DRIVE ORIGINAL (deliberate):
-  2026-07-27 — the WCS lifecycle table's Exploring row said "<25K impressions AND <7 days live",
-  which contradicts both "Optimized requires BOTH" (§3) and §3's own "In Practice" line
-  ("<25K impressions or <7 days"). Changed to OR, with the reasoning inline in §4. If a domain
-  owner decides AND was intended, revert §4/§9/§11 together AND change
-  mcoLifecycleState() in Dashboard.html plus MCO_RULES.lifecycle_states in Code.js.
+  2026-07-27 — the lifecycle section listed TWO states defined by the 25K-impressions /
+  7-days rule. The authoritative definition (supplied by Sherine from the Looker queries that
+  produce the state counts) is THREE mutually exclusive states, each a predicate over the
+  queue_creative_statistics PDT:
+     queuing    = queue_eligible AND NOT optimizing AND current_status='excluded'
+     exploring  = queue_eligible AND NOT optimizing AND current_status='included'
+     optimizing = NOT queue_eligible AND is_currently_optimizing
+  §4, §9 and §11 now state that; the impressions/age rule is demoted to "what flips
+  is_currently_optimizing". Mirrored as data in MCO_RULES.creative_states (Code.js), which is
+  what buildQueueingSQL / buildExploringSQL / buildOptimizingSQL already implement.
+  (An intermediate 2026-07-27 edit flipped the old two-state table's Exploring row from AND to
+  OR; that remains the right *proxy* logic — see mcoLifecycleStateProxy() — but it was
+  describing a derivation, not the definition, and is superseded here.)
 
 NUMBERS: every threshold in this prose is mirrored as data in MCO_RULES (appscript/Code.js).
 tools/sync_skill.py warns when a MCO_RULES number no longer appears here. Change both together.
@@ -152,16 +160,26 @@ When a bid is won by an "optimized" creative, 5-10% of the time (max 35%) the op
 
 | State | Criteria | Behavior |
 |-------|----------|----------|
-| **Exploring** | <25K impressions **OR** <7 days live | Protected from Auto-Pauser. Receives forced impressions via WCS. |
-| **Optimizing** | ≥25K impressions **AND** ≥7 days live | Normal MCO competition. Eligible for Auto-Pauser. |
+| **Queuing** | `is_currently_queue_eligible` AND NOT `is_currently_optimizing` AND `current_status = 'excluded'` | In the throttle waiting room. Queue-eligible but excluded from serving, so no WCS impressions yet. Protected from Auto-Pauser. |
+| **Exploring** | `is_currently_queue_eligible` AND NOT `is_currently_optimizing` AND `current_status = 'included'` | Past the throttle and being served via WCS substitution, still pre-calibration. Protected from Auto-Pauser. |
+| **Optimizing** | NOT `is_currently_queue_eligible` AND `is_currently_optimizing` | Calibrated. Normal MCO competition on ITI. Eligible for Auto-Pauser. |
 
-> **The two states are complements, so the Exploring row is an OR.** "Optimized" requires
-> *both* counts (see §3), therefore failing *either* one leaves the creative exploring and
-> WCS-protected — which is what §3 "In Practice" already says. An earlier revision of this
-> table wrote the Exploring row as an AND, which left a creative with 30K impressions but
-> only 3 days live in neither state; code implementing that reading treated it as
-> *optimizing*, i.e. eligible for the Auto-Pauser, contradicting the Auto-Pauser's own
-> criteria. Corrected 2026-07-27.
+> **State is read, not derived.** There are exactly **three** states and they are **mutually
+> exclusive**. Each is a predicate over the `queue_creative_statistics` PDT
+> (`looker.*queue_creative_statistics`, joined on `creative_id`; the creative and the campaign
+> must both be `state = 'enabled'`). Queuing and Exploring differ **only** by `current_status`
+> — `'excluded'` means throttled and not being served, `'included'` means being served.
+>
+> The 25K-impressions / 7-days rule is what makes the **platform** flip
+> `is_currently_optimizing`; it is not a definition to recompute. Do not infer a creative's
+> state from impressions and age — if the PDT has no row for a creative (e.g. it is paused),
+> it has no state, and the honest answer is `insufficient_data`.
+>
+> *History:* this table previously listed only two states, defined by the impressions/age
+> rule. A 2026-07-27 revision changed its Exploring row from AND to OR — correct as a
+> *proxy* for "not yet calibrated", but it was still describing a derivation rather than the
+> real definition, and it had no way to express Queuing at all. Superseded by the three
+> predicates above (authoritative source: the Looker queries behind the state counts).
 
 - All new creatives start as "exploring"
 - For net-new apps (all exploring), no substitutions until first creative becomes "optimizing"
@@ -249,7 +267,9 @@ LXA only eligible on VX exchange. Filtered out in eligibility step on other exch
 ## 10. Diagnosis Logic
 
 1. **Free Floating** → `free_floating_random` (recommend adopting MCO)
-2. **<25K imps OR <7 days** (i.e. not yet "Optimized") → exploring (`wcs_protected` or `throttle_queued`)
+2. **State is `queuing`** (`current_status = 'excluded'`) → `exploring_throttle_queued`;
+   **state is `exploring`** (`'included'`) → `exploring_wcs_protected`. Read the state, don't
+   derive it from impressions/age; if there is no state, say `insufficient_data`.
 3. **Paused**: compare ITI vs group, check spend share <5%, selection prob <10%
 4. **Spending + highest ITI** → `winning_highest_iti`; otherwise check eligibility
 5. **Not spending + lower ITI** → `losing_iti_competition`
@@ -265,8 +285,9 @@ LXA only eligible on VX exchange. Filtered out in eligibility step on other exch
 | **ITI** | Impression-to-Install rate (30-day window) |
 | **WCS** | Winner Candidate Substitution |
 | **Auto-Pauser** | Pauses underperforming optimized creatives |
-| **Exploring** | <25K imps OR <7 days (not yet Optimized), protected |
-| **Optimizing** | ≥25K imps AND ≥7 days, normal competition |
+| **Queuing** | Queue-eligible, `current_status='excluded'` — throttled, not yet served, protected |
+| **Exploring** | Queue-eligible, `current_status='included'` — served via WCS, pre-calibration, protected |
+| **Optimizing** | `is_currently_optimizing` — calibrated, normal competition, Auto-Pauser-eligible |
 | **Free Floating** | Non-MCO, random selection |
 | **Inventory Format** | e.g. phone-portrait-vast-30s |
 | **MAF** | Multi-Ad Format ad group |

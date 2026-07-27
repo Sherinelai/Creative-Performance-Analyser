@@ -416,11 +416,15 @@ function primaryMetricKey(campType){
 }
 
 /**
- * Lifecycle state per the Auto-Pauser's own definition: "Optimized" requires BOTH
- * >= min_impressions AND >= min_days_live, so failing EITHER leaves the creative
- * exploring (and therefore WCS-protected).
+ * PROXY ONLY — use when the queue PDT returned no state for an active creative.
+ *
+ * The authoritative state is one of three (queuing / exploring / optimizing) read from
+ * looker.*queue_creative_statistics; see MCO_RULES.creative_states. This function cannot
+ * reproduce that: it only guesses at `is_currently_optimizing` from the calibration counts
+ * (both must be met — failing either means not yet calibrated), and it can NEVER return
+ * 'queuing', because queuing vs exploring is `current_status`, not a function of age.
  */
-function mcoLifecycleState(impressions,daysLive){
+function mcoLifecycleStateProxy(impressions,daysLive){
   var MR=mcoRules();
   if(!MR)return null;
   var c=MR.calibration;
@@ -724,13 +728,12 @@ function loadDummy(type){
   perfs.forEach(function(c){if(!c.flags)c.flags=[];});
   // ciDashboardSetup fallback (Analysis.gs normally provides this)
   d.ciDashboardSetup = d.ciDashboardSetup || {model_type:'--',primary_metric:'--',secondary_metric:'--',variance_level:'--'};
-  // Add lifecycle_state for demo (newer = exploring, older = optimizing)
-  // is_queuing is set directly in DUMMY data, no need to compute here
+  // Demo-only lifecycle_state. The three states are mutually exclusive, so is_queuing in the
+  // DUMMY rows means lifecycle_state 'queuing' — not 'exploring' with a flag.
   perfs.forEach(function(c){
     if(!c.created_date){c.lifecycle_state='optimizing';c.mco_group=invToDN(c.competing_group);return;}
     var daysOld=Math.floor((new Date()-new Date(c.created_date))/864e5);
-    // Queuing creatives are also in exploring state (throttled new creatives)
-    c.lifecycle_state=(daysOld<=30||c.is_queuing)?'exploring':'optimizing';
+    c.lifecycle_state=c.is_queuing?'queuing':(daysOld<=30?'exploring':'optimizing');
     c.mco_group=invToDN(c.competing_group);
   });
   // Log demo usage
@@ -2318,7 +2321,7 @@ function renderMergedTable(){
     if(_tblFilter.variance&&c.variance!==_tblFilter.variance)return false;
     if(_tblFilter.cidSearch&&String(c.creative_id).indexOf(_tblFilter.cidSearch)<0)return false;
     if(_tblFilter.pipeline){
-      if(_tblFilter.pipeline==='queuing'&&!c.is_queuing)return false;
+      if(_tblFilter.pipeline==='queuing'&&c.lifecycle_state!=='queuing')return false;
       if(_tblFilter.pipeline==='exploring'&&c.lifecycle_state!=='exploring')return false;
       if(_tblFilter.pipeline==='optimizing'&&c.lifecycle_state!=='optimizing')return false;
     }
@@ -2502,16 +2505,15 @@ function renderMergedTable(){
       if(c.iti!=null){sItiS+=c.iti;sItiN++;if(c.impressions>0){instD7S+=c.iti*c.impressions;impS+=c.impressions;itiN++;ipmN++;}}
       (c.flags||[]).forEach(function(f){fc[f]=(fc[f]||0)+1;});
       varCnts[c.variance||'none']=(varCnts[c.variance||'none']||0)+1;
-      if(c.is_queuing){lcQueuing++;}
-      else {
-        // Fallback: derive lifecycle from impressions + age only for active creatives
-        if(!c.lifecycle_state && c.status==='active'){
-          var impr=c.impressions||0;
-          var dLive=c.created_date?Math.floor((new Date()-new Date(c.created_date))/864e5):99;
-          c.lifecycle_state=mcoLifecycleState(impr,dLive);  // thresholds from CFG.mcoRules (Code.js)
-        }
-        if(c.lifecycle_state){var lcs=c.lifecycle_state.toLowerCase();if(lcs==='exploring')lcExploring++;else if(lcs==='optimizing')lcOptimizing++;}
+      // One creative, one state — queuing / exploring / optimizing are mutually exclusive
+      // (MCO_RULES.creative_states). Only fill in a state when the queue PDT gave none.
+      if(!c.lifecycle_state && c.status==='active'){
+        var impr=c.impressions||0;
+        var dLive=c.created_date?Math.floor((new Date()-new Date(c.created_date))/864e5):99;
+        c.lifecycle_state=mcoLifecycleStateProxy(impr,dLive);
       }
+      var lcs=(c.lifecycle_state||'').toLowerCase();
+      if(lcs==='queuing')lcQueuing++;else if(lcs==='exploring')lcExploring++;else if(lcs==='optimizing')lcOptimizing++;
     });
     var wRoas=revS>0?custRevS/revS:(sRoasN>0?sRoasS/sRoasN:null);
     var wRpi=inst1S>0?rev1S/inst1S:(sRpiN>0?sRpiS/sRpiN:null);
@@ -2595,19 +2597,18 @@ function renderMergedTable(){
       else if(fmtAvgCidSet[cid])perfTags+=' <span class="tag tag-b">'+_arrow+' Format avg</span>';
       if(poorCidSet[cid])perfTags+=' <span class="tag" style="background:rgba(237,3,3,0.08);color:var(--rd);border:1px solid rgba(237,3,3,0.25);font-weight:600">&#9888; Poor</span>';
       var cidLink='<a href="https://app.liftoff.io/admin/labrat/creatives?states=enabled&creative_id='+cid+'" target="_blank" rel="noopener" style="color:var(--peri);text-decoration:none;font-weight:600" onclick="event.stopPropagation()">'+cid+'</a>';
-      // Lifecycle state for Pipeline column — Queuing takes precedence
+      // Pipeline column — one badge per creative, from the single lifecycle_state.
       var lcPipeline='&mdash;';
-      // Frontend fallback: only for ACTIVE creatives (paused → no pipeline state, per SQL logic)
-      if(!c.lifecycle_state && !c.is_queuing && c.status==='active'){
+      // Frontend proxy: only for ACTIVE creatives (paused → no pipeline state, per the SQL).
+      if(!c.lifecycle_state && c.status==='active'){
         var impr=c.impressions||0;
         var dLive=c.created_date?Math.floor((new Date()-new Date(c.created_date))/864e5):99;
-        c.lifecycle_state=mcoLifecycleState(impr,dLive);  // thresholds from CFG.mcoRules (Code.js)
+        c.lifecycle_state=mcoLifecycleStateProxy(impr,dLive);
       }
-      if(c.is_queuing){
-        lcPipeline='<span class="tag tag-a">Queuing</span>';
-      } else if(c.lifecycle_state){
+      if(c.lifecycle_state){
         var lcs=c.lifecycle_state.toLowerCase();
-        if(lcs==='exploring')lcPipeline='<span class="tag tag-b">Exploring</span>';
+        if(lcs==='queuing')lcPipeline='<span class="tag tag-a">Queuing</span>';
+        else if(lcs==='exploring')lcPipeline='<span class="tag tag-b">Exploring</span>';
         else if(lcs==='optimizing')lcPipeline='<span class="tag tag-g">Optimizing</span>';
         else lcPipeline='<span class="tag" style="background:var(--sf2);color:var(--tx3)">'+c.lifecycle_state+'</span>';
       }
@@ -3011,7 +3012,7 @@ function exportTable(fmt){
     if(!hc['ci'])row.push((c.ci_range||'').replace(/,/g,';'));
     if(!hc['impressions'])row.push(c.impressions||'');
     if(!hc['installs_col'])row.push(c.installs||c.installs_cstudio||'');
-    row.push(c.lifecycle_state||'',c.is_queuing?'Queuing':'',((c.flags||[]).join('; ')));
+    row.push(c.lifecycle_state||'',c.lifecycle_state==='queuing'?'Queuing':'',((c.flags||[]).join('; ')));
     rows.push(row.map(function(v){var s=String(v==null?'':v);return s.indexOf(sep)>=0||s.indexOf('"')>=0?'"'+s.replace(/"/g,'""')+'"':s;}).join(sep));
   });
   // Download

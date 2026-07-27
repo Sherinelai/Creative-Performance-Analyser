@@ -88,10 +88,34 @@ var MCO_RULES = {
   // Inventory groups are not clean buckets: 30s/60s VAST overlap this often
   eligibility: { format_overlap_pct: 46.5 },
 
-  lifecycle_states: {
-    exploring:  'below calibration on EITHER impressions or days live — protected from the Auto-Pauser, receives WCS impressions',
-    optimizing: 'at or above calibration on BOTH — normal MCO competition, eligible for the Auto-Pauser'
+  // ── Creative state: AUTHORITATIVE, read from the queue PDT — never derived ──
+  // There are exactly THREE states and they are MUTUALLY EXCLUSIVE. Each is a predicate
+  // over looker.*queue_creative_statistics (auto-discovered by getQueuePDT()), and
+  // buildQueueingSQL / buildExploringSQL / buildOptimizingSQL implement exactly these.
+  // Do NOT compute a creative's state from impressions and age: the 25K/7-day rule below
+  // is what makes the PLATFORM flip is_currently_optimizing, not a definition the app
+  // should re-derive.
+  creative_states: {
+    queuing: {
+      predicate: "is_currently_queue_eligible AND NOT is_currently_optimizing AND current_status = 'excluded'",
+      meaning: 'In the creative-throttle waiting room: queue-eligible but excluded from serving, so it gets no WCS impressions yet. Waiting for capacity.'
+    },
+    exploring: {
+      predicate: "is_currently_queue_eligible AND NOT is_currently_optimizing AND current_status = 'included'",
+      meaning: 'Past the throttle and actively being served via WCS substitution, still pre-calibration. Protected from the Auto-Pauser.'
+    },
+    optimizing: {
+      predicate: 'NOT is_currently_queue_eligible AND is_currently_optimizing',
+      meaning: 'Calibrated: competing normally on ITI inside its inventory group, and eligible for the Auto-Pauser.'
+    }
   },
+  creative_state_source: "looker.*queue_creative_statistics PDT (dated — resolve via getQueuePDT()), joined on creative_id; both the creative and the campaign must be state='enabled'",
+  // queuing vs exploring differ ONLY by current_status ('excluded' = throttled/not served,
+  // 'included' = being served). Both are pre-calibration and both are Auto-Pauser-protected.
+  creative_state_notes: 'A creative absent from the PDT (e.g. paused) has no state — report insufficient_data rather than guessing.',
+  // What the platform uses to set is_currently_optimizing. A proxy at best, for when the
+  // PDT returned nothing: failing EITHER calibration count means not-yet-optimized.
+  calibration_trigger: 'is_currently_optimizing flips true once the creative clears BOTH calibration counts (impressions AND days live); failing either leaves it pre-calibration',
 
   // The closed vocabulary the AI must return and the UI must render
   diagnosis_codes: {
@@ -147,9 +171,9 @@ function mcoRulesPromptBlock() {
   var R = MCO_RULES, L = [];
   L.push('## Authoritative thresholds (these override any number in the prose above)');
   L.push('- Selection metric: ' + R.selection_metric + ' over ' + R.iti_window_days + ' days.');
-  L.push('- Calibration / optimizing: >= ' + R.calibration.min_impressions + ' impressions (past ' +
-         R.calibration.impressions_window_months + ' months) AND >= ' + R.calibration.min_days_live + ' days live.');
-  L.push('- Exploring: below calibration on EITHER count. ' + R.lifecycle_states.exploring);
+  L.push('- Calibration: >= ' + R.calibration.min_impressions + ' impressions (past ' +
+         R.calibration.impressions_window_months + ' months) AND >= ' + R.calibration.min_days_live + ' days live. ' +
+         R.calibration_trigger + '.');
   L.push('- Auto-Pauser lose criteria (ALL): optimized; AND < ' + R.auto_pauser.spend_share_pct +
          '% of its competing inventory group spend over the past ' + R.auto_pauser.spend_share_window_days +
          ' days; AND (spent in that window OR selection probability < ' + R.auto_pauser.selection_prob_pct + '%).');
@@ -157,6 +181,14 @@ function mcoRulesPromptBlock() {
          '% of won bids (max ' + R.wcs.substitution_rate_pct_cap + '%).');
   L.push('- Creative throttle: minimum ' + R.throttle.min_capacity_per_format + ' exploring creatives per inventory format.');
   L.push('- Inventory-format overlap: ~' + R.eligibility.format_overlap_pct + '% between duration variants.');
+  L.push('');
+  L.push('## Creative state (authoritative — three mutually exclusive states)');
+  L.push('Read from ' + R.creative_state_source + '. Never infer a state from impressions or age.');
+  Object.keys(R.creative_states).forEach(function(s) {
+    var st = R.creative_states[s];
+    L.push('- **' + s + '** — `' + st.predicate + '`. ' + st.meaning);
+  });
+  L.push('- ' + R.creative_state_notes);
   L.push('');
   L.push('## Allowed `diagnosis` values (return EXACTLY one of these strings)');
   Object.keys(R.diagnosis_codes).forEach(function(k) { L.push('- `' + k + '` — ' + R.diagnosis_codes[k]); });
@@ -1153,16 +1185,21 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
       if (result.creativePerf) {
         result.creativePerf.forEach(function(cp) {
           var cid = String(cp.creative_id);
-          cp.is_queuing = !!queuingSet[cid];
-          if (cp.is_queuing) {
-            cp.lifecycle_state = 'exploring'; // queuing creatives are in exploring phase (throttled)
+          // The three states are mutually exclusive in the source data (queuing and
+          // exploring differ only by current_status), so lifecycle_state carries all
+          // three. It used to collapse queuing into 'exploring' with is_queuing as a
+          // side flag, which made a queuing creative match BOTH the queuing and the
+          // exploring filter and count twice in the pipeline totals.
+          if (queuingSet[cid]) {
+            cp.lifecycle_state = 'queuing';
           } else if (exploringSet[cid]) {
             cp.lifecycle_state = 'exploring';
           } else if (optimizingSet[cid]) {
             cp.lifecycle_state = 'optimizing';
           } else {
-            cp.lifecycle_state = null; // paused or not in PDT → no state
+            cp.lifecycle_state = null; // paused or not in the PDT → no state
           }
+          cp.is_queuing = (cp.lifecycle_state === 'queuing'); // kept as an alias for the UI
         });
       }
     } catch(e) { Logger.log('Lifecycle/queuing parse failed: ' + e.message); }
@@ -1379,9 +1416,10 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
         var exploringCnt = 0, queuingCnt = 0, optimizingCnt = 0, zeroSpendLive = 0;
         (result.creativePerf || []).forEach(function(c) {
           if (c.status !== 'active') return;
-          if (c.is_queuing) queuingCnt++;
-          if (c.lifecycle_state === 'exploring') exploringCnt++;
-          if (c.lifecycle_state === 'optimizing') optimizingCnt++;
+          // One creative, one state — see MCO_RULES.creative_states.
+          if (c.lifecycle_state === 'queuing') queuingCnt++;
+          else if (c.lifecycle_state === 'exploring') exploringCnt++;
+          else if (c.lifecycle_state === 'optimizing') optimizingCnt++;
           if ((c.spend || 0) <= 0) zeroSpendLive++;
         });
 
@@ -1747,18 +1785,8 @@ function getQueuePDT() {
   return _queuePdtTable;
 }
 
-// Helper: shared CTE for all three lifecycle queries
-function _queueCTEs() {
-  return [
-    "WITH pinpoint__creatives_simple AS (",
-    "  SELECT c.id, c.external_id, c.state, c.inventory_format",
-    "  FROM pinpoint.public.creatives c",
-    "),",
-    "pinpoint__campaigns_creatives AS (",
-    "  SELECT * FROM pinpoint.public.campaigns_creatives",
-    ")",
-  ].join('\n');
-}
+// (a `_queueCTEs()` helper used to live here and was never called — a fourth copy of the
+// CTE the three state queries each inline. Removed; if you factor the CTE out, use it.)
 
 // ═══════════════════════════════════════════════════════════
 // QUERY M-1: QUEUING creatives
@@ -2401,16 +2429,26 @@ var MCO_SKILL = [
   '',
   '| State | Criteria | Behavior |',
   '|-------|----------|----------|',
-  '| **Exploring** | <25K impressions **OR** <7 days live | Protected from Auto-Pauser. Receives forced impressions via WCS. |',
-  '| **Optimizing** | ≥25K impressions **AND** ≥7 days live | Normal MCO competition. Eligible for Auto-Pauser. |',
+  '| **Queuing** | `is_currently_queue_eligible` AND NOT `is_currently_optimizing` AND `current_status = \'excluded\'` | In the throttle waiting room. Queue-eligible but excluded from serving, so no WCS impressions yet. Protected from Auto-Pauser. |',
+  '| **Exploring** | `is_currently_queue_eligible` AND NOT `is_currently_optimizing` AND `current_status = \'included\'` | Past the throttle and being served via WCS substitution, still pre-calibration. Protected from Auto-Pauser. |',
+  '| **Optimizing** | NOT `is_currently_queue_eligible` AND `is_currently_optimizing` | Calibrated. Normal MCO competition on ITI. Eligible for Auto-Pauser. |',
   '',
-  '> **The two states are complements, so the Exploring row is an OR.** "Optimized" requires',
-  '> *both* counts (see §3), therefore failing *either* one leaves the creative exploring and',
-  '> WCS-protected — which is what §3 "In Practice" already says. An earlier revision of this',
-  '> table wrote the Exploring row as an AND, which left a creative with 30K impressions but',
-  '> only 3 days live in neither state; code implementing that reading treated it as',
-  '> *optimizing*, i.e. eligible for the Auto-Pauser, contradicting the Auto-Pauser\'s own',
-  '> criteria. Corrected 2026-07-27.',
+  '> **State is read, not derived.** There are exactly **three** states and they are **mutually',
+  '> exclusive**. Each is a predicate over the `queue_creative_statistics` PDT',
+  '> (`looker.*queue_creative_statistics`, joined on `creative_id`; the creative and the campaign',
+  '> must both be `state = \'enabled\'`). Queuing and Exploring differ **only** by `current_status`',
+  '> — `\'excluded\'` means throttled and not being served, `\'included\'` means being served.',
+  '>',
+  '> The 25K-impressions / 7-days rule is what makes the **platform** flip',
+  '> `is_currently_optimizing`; it is not a definition to recompute. Do not infer a creative\'s',
+  '> state from impressions and age — if the PDT has no row for a creative (e.g. it is paused),',
+  '> it has no state, and the honest answer is `insufficient_data`.',
+  '>',
+  '> *History:* this table previously listed only two states, defined by the impressions/age',
+  '> rule. A 2026-07-27 revision changed its Exploring row from AND to OR — correct as a',
+  '> *proxy* for "not yet calibrated", but it was still describing a derivation rather than the',
+  '> real definition, and it had no way to express Queuing at all. Superseded by the three',
+  '> predicates above (authoritative source: the Looker queries behind the state counts).',
   '',
   '- All new creatives start as "exploring"',
   '- For net-new apps (all exploring), no substitutions until first creative becomes "optimizing"',
@@ -2498,7 +2536,9 @@ var MCO_SKILL = [
   '## 10. Diagnosis Logic',
   '',
   '1. **Free Floating** → `free_floating_random` (recommend adopting MCO)',
-  '2. **<25K imps OR <7 days** (i.e. not yet "Optimized") → exploring (`wcs_protected` or `throttle_queued`)',
+  '2. **State is `queuing`** (`current_status = \'excluded\'`) → `exploring_throttle_queued`;',
+  '   **state is `exploring`** (`\'included\'`) → `exploring_wcs_protected`. Read the state, don\'t',
+  '   derive it from impressions/age; if there is no state, say `insufficient_data`.',
   '3. **Paused**: compare ITI vs group, check spend share <5%, selection prob <10%',
   '4. **Spending + highest ITI** → `winning_highest_iti`; otherwise check eligibility',
   '5. **Not spending + lower ITI** → `losing_iti_competition`',
@@ -2514,8 +2554,9 @@ var MCO_SKILL = [
   '| **ITI** | Impression-to-Install rate (30-day window) |',
   '| **WCS** | Winner Candidate Substitution |',
   '| **Auto-Pauser** | Pauses underperforming optimized creatives |',
-  '| **Exploring** | <25K imps OR <7 days (not yet Optimized), protected |',
-  '| **Optimizing** | ≥25K imps AND ≥7 days, normal competition |',
+  '| **Queuing** | Queue-eligible, `current_status=\'excluded\'` — throttled, not yet served, protected |',
+  '| **Exploring** | Queue-eligible, `current_status=\'included\'` — served via WCS, pre-calibration, protected |',
+  '| **Optimizing** | `is_currently_optimizing` — calibrated, normal competition, Auto-Pauser-eligible |',
   '| **Free Floating** | Non-MCO, random selection |',
   '| **Inventory Format** | e.g. phone-portrait-vast-30s |',
   '| **MAF** | Multi-Ad Format ad group |',

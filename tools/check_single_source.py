@@ -43,6 +43,19 @@ FORBIDDEN: list[tuple[Path, str, str]] = [
      "runtime Drive read — the skill is compiled in by tools/sync_skill.py"),
     (CODE, r"CLIENT_ID:\s*'[^']+'",
      "credential in source — read LOOKER_CLIENT_ID from Script Properties"),
+    (CODE, r"lifecycle_state\s*=\s*'exploring';\s*//\s*queuing",
+     "queuing collapsed into exploring — the three creative states are mutually exclusive"),
+    (DASH, r"is_queuing\s*\?\s*'Queuing'|!c\.is_queuing",
+     "state read off the is_queuing flag — compare lifecycle_state === 'queuing' instead"),
+]
+
+# The three creative-state queries must keep the predicates that distinguish them
+# (MCO_RULES.creative_states). A copy/paste slip here silently mislabels every creative.
+STATE_SQL: list[tuple[str, list[str]]] = [
+    ("buildQueueingSQL",   ["is_currently_queue_eligible", "current_status) = 'excluded'"]),
+    ("buildExploringSQL",  ["is_currently_queue_eligible", "current_status) = 'included'"]),
+    ("buildOptimizingSQL", ["NOT (queue_creative_statistics.is_currently_queue_eligible",
+                            "AND (queue_creative_statistics.is_currently_optimizing)"]),
 ]
 
 # (file, regex, minimum, maximum, description)
@@ -68,6 +81,17 @@ def main() -> int:
         if not (lo <= n <= hi):
             failures.append(f"{path.name}: found {n} {what}, expected {lo}"
                             + (f"-{hi}" if hi != lo else ""))
+
+    code_src = CODE.read_text(encoding="utf-8")
+    for fn, needles in STATE_SQL:
+        m = re.search(r"function " + fn + r"\(.*?\n\}", code_src, re.S)
+        if not m:
+            failures.append(f"Code.js: {fn}() not found — the creative-state queries are load-bearing")
+            continue
+        for needle in needles:
+            if needle not in m.group(0):
+                failures.append(f"Code.js: {fn}() lost its distinguishing predicate {needle!r} "
+                                "(see MCO_RULES.creative_states)")
 
     sync = subprocess.run([sys.executable, str(ROOT / "tools" / "sync_skill.py"), "--check"],
                           capture_output=True, text=True)
