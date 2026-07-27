@@ -1101,8 +1101,12 @@ function renderStatusDetail(){
     }
   }
   panel.innerHTML=h;
-  // Render cached diagnosis only for MAB pauses
-  if(isMab&&_diagCache[cid])renderMcoDiagnosis(cid,_diagCache[cid]);
+  // Render the cached diagnosis, or fetch it now for the creative the user just selected.
+  // (On-demand, not prefetched for every auto-paused creative — see fetchDiagnosisFor.)
+  if(isMab){
+    if(_diagCache[cid])renderMcoDiagnosis(cid,_diagCache[cid]);
+    else fetchDiagnosisFor(cid);
+  }
 }
 
 function toggleStatusMetric(cid,metric){
@@ -1200,14 +1204,26 @@ function renderStatusMiniChart(points,cp,cid){
   return '<div class="chart-svg-wrap" style="position:relative">'+svg+hz+'</div>'+legend;
 }
 
-function prefetchAllDiagnoses(){
-  if(!R)return;
-  var pausedEntries=(R.statusLog||[]).filter(function(e){
-    if(e.change_type!=='paused')return false;
+/**
+ * Fetch the MCO diagnosis for ONE creative, on demand.
+ *
+ * This used to be prefetchAllDiagnoses(): one Claude call per auto-paused creative, fired the
+ * moment the dashboard rendered. That was already wasteful (nobody reads 30 diagnoses), and it
+ * got worse when statusLog started listing every paused creative instead of the revenue-filtered
+ * subset — campaign 41535 went from 7 candidates to 36. Now the call happens when a creative is
+ * actually selected, and _diagCache keeps it for the rest of the session.
+ *
+ * @param {string} cidIn creative_id to diagnose; no-op if already cached or not auto-paused.
+ */
+function fetchDiagnosisFor(cidIn){
+  if(!R||!cidIn)return;
+  var entry=(R.statusLog||[]).find(function(e){
+    if(String(e.creative_id)!==String(cidIn)||e.change_type!=='paused')return false;
     var by=(e.changed_by||'').toLowerCase();
-    return by.indexOf('mab')>=0||by.indexOf('auto')>=0;
+    return by.indexOf('mab')>=0||by.indexOf('auto')>=0;   // only auto-pauses get an MCO diagnosis
   });
-  pausedEntries.forEach(function(entry){
+  if(!entry)return;
+  [entry].forEach(function(entry){
     var cid=String(entry.creative_id);
     if(_diagCache[cid])return; // already cached
     var cp=(R.creativePerf||[]).find(function(c){return String(c.creative_id)===cid;});
@@ -1323,8 +1339,9 @@ function checkUrlParams(){
 function requestAiInsights(){
   if(!R)return;
 
-  // 1. MCO diagnosis — prefetch all paused creatives in background
-  prefetchAllDiagnoses();
+  // 1. MCO diagnosis — on demand only. renderStatusDetail() fetches for the selected creative,
+  //    so we just warm the one that is already selected instead of every auto-paused creative.
+  if(_selectedStatusCid)fetchDiagnosisFor(String(_selectedStatusCid));
 
   // 2. Format trend summary — recompute formatMetrics using invToDN (same as chart)
   var fmSummary={};
@@ -1682,6 +1699,7 @@ function renderFormatSummary(data){
    ═══════════════════════════════════════════════════════════ */
 function getLegendLabels(){
   var grps={};(R.creativePerf||[]).forEach(function(c){
+    if(c.is_metricless)return;   // never served — no spend to attribute, see seriesFromPerf
     // Use mco_group if available (set by Code.gs toMcoGroup), else invToDN on competing_group
     var lbl=c.mco_group||invToDN(c.competing_group);
     grps[lbl]=(grps[lbl]||0)+(c.spend||0);
@@ -1741,7 +1759,10 @@ function renderSingleMetricChart(metric){
 
 function seriesFromPerf(){
   var grps={};
-  (R.creativePerf||[]).forEach(function(c){var lbl=c.mco_group||invToDN(c.competing_group);grps[lbl]=(grps[lbl]||0)+(c.spend||0);});
+  // Skip metric-less rows (queued creatives that never served). They have no spend, so they
+  // would add 0-value slices and 0% legend rows to a spend-share chart, and they would take
+  // colour slots that shift every other format's colour. They belong in the table, not here.
+  (R.creativePerf||[]).forEach(function(c){if(c.is_metricless)return;var lbl=c.mco_group||invToDN(c.competing_group);grps[lbl]=(grps[lbl]||0)+(c.spend||0);});
   var total=0;Object.keys(grps).forEach(function(k){total+=grps[k];});
   return Object.keys(grps).sort(function(a,b){return grps[b]-grps[a];}).map(function(k){return {label:k,value:grps[k],pct:total>0?+(grps[k]/total*100).toFixed(1):0};});
 }

@@ -56,6 +56,7 @@ const wanted = {
   meta: `buildCampaignMetaSQL(${campaignId})`,
   dailyCr: `buildDailyCreativeMetricsSQL(${campaignId}, ${lookbackDays})`,
   impInst: `buildImpressionInstallSQL(${campaignId}, ${lookbackDays})`,
+  pauseLog: `buildPauseLogSQL(${campaignId}, ${lookbackDays})`,
 };
 
 const out = {};

@@ -1481,7 +1481,6 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
     // Parse pause log — new SQL returns: pause_method, current_pause_date, creative_id, external_id, latest_enabled_date
     try {
       var plRows = b2.pauseLog || [];
-      var freshStatusLog = [];
       var plMap = {}; // creative_id → {pause_method, paused_date, external_id, latest_enabled_date}
 
       plRows.forEach(function(r) {
@@ -1493,34 +1492,37 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
           external_id:         r.external_id || null,
           latest_enabled_date: r.latest_enabled_date || null
         };
-        // statusLog: only include paused creatives
-        if (r.current_pause_date && campaignCids[cid]) {
-          freshStatusLog.push({
-            date:        r.current_pause_date,
-            creative_id: cid,
-            change_type: 'paused',
-            changed_by:  r.pause_method || 'unknown'
-          });
-        }
       });
 
-      freshStatusLog.sort(function(a, b) { return (b.date || '').localeCompare(a.date || ''); });
-
-      if (freshStatusLog.length > 0 || plRows.length > 0) {
-        result.statusLog = freshStatusLog;
-        Logger.log('PauseLog: ' + plRows.length + ' creatives, ' + freshStatusLog.length + ' paused');
-      } else {
-        // Fallback to inventory-based statusLog
-        var fallbackLog = [];
-        (b1.inventory || []).forEach(function(c) {
-          if (c.paused_date && campaignCids[String(c.creative_id)]) {
-            fallbackLog.push({ date: c.paused_date, creative_id: String(c.creative_id), change_type: 'paused', changed_by: c.pause_method || 'unknown' });
-          }
+      // ── statusLog: ONE source for "which creatives are paused" ───────────────
+      // It is creativePerf, the same rows the KPI tile counts, so the "N paused" badge and the
+      // "Paused creatives" tile can no longer disagree. The pauseLog query is now only an
+      // ENRICHMENT (when it was paused, and by what).
+      //
+      // It used to be the other way round: the badge was the pauseLog row count, and that query
+      // carries filters the tile doesn't — `HAVING SUM(cstudio_analytics_daily_v1.revenue_micros)
+      // > 1` (a different revenue table from everything else in the dashboard, and an arbitrary
+      // $1 floor), `inventory_format IS NOT NULL`, `creative_selection_method IS NOT NULL`, and a
+      // different date window (last 30 days including the unbaked 7, vs [-37d,-7d)). Measured on
+      // campaign 41535: the tile said 36 and the badge said 7. Of the 29 missing, 24 were dropped
+      // by the $1 floor (some had $0.006 of cstudio revenue while showing >$1 in
+      // daily_attr_event_d7) and 5 had no cstudio rows at all. All 29 genuinely had an
+      // enabled->paused event and state 'paused' — nothing was wrong with the data.
+      var freshStatusLog = [];
+      (result.creativePerf || []).forEach(function(cp) {
+        if (cp.status !== 'paused') return;
+        var pl = plMap[String(cp.creative_id)] || {};
+        freshStatusLog.push({
+          date:        pl.paused_date || cp.paused_date || null,
+          creative_id: String(cp.creative_id),
+          change_type: 'paused',
+          changed_by:  pl.pause_method || cp.pause_method || 'unknown'
         });
-        fallbackLog.sort(function(a, b) { return (b.date || '').localeCompare(a.date || ''); });
-        result.statusLog = fallbackLog;
-        Logger.log('PauseLog: 0 rows, fallback to inventory (' + fallbackLog.length + ')');
-      }
+      });
+      freshStatusLog.sort(function(a, b) { return (b.date || '').localeCompare(a.date || ''); });
+      result.statusLog = freshStatusLog;
+      Logger.log('statusLog: ' + freshStatusLog.length + ' paused creatives (' + plRows.length +
+                 ' enriched from pauseLog)');
 
       // Patch external_id, paused_date, latest_enabled_date into creativePerf
       if (result.creativePerf && Object.keys(plMap).length > 0) {
