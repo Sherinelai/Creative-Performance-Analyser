@@ -2385,7 +2385,15 @@ function renderMergedTable(){
     }
     return true;
   });
-  filteredPerf.forEach(function(c){
+  // Which creative SUB-ROWS to show. The filter decides visibility only — every format row's
+  // numbers stay accumulated over ALL creatives, so selecting or filtering creatives never makes a
+  // format's spend/ROAS/RPI/counts move. Aggregating the filtered subset instead (what this used to
+  // do) meant the same format reported different totals depending on the filter.
+  var visibleCids={};
+  filteredPerf.forEach(function(c){ visibleCids[String(c.creative_id)]=true; });
+  var _filterActive=(filteredPerf.length!==(R.creativePerf||[]).length);
+
+  (R.creativePerf||[]).forEach(function(c){
     var dn=c.mco_group||invToDN(c.competing_group);
     if(!groups[dn])groups[dn]={name:dn,creatives:[],spend:0,active:0,paused:0,newestDays:9999,hasStale:false};
     if(dn==='Unknown')return; // skip Unknown
@@ -2529,6 +2537,12 @@ function renderMergedTable(){
       if(groupMatchCids.length===0)return;
     }
     var autoExpand=(_perfFilter&&groupMatchCids.length>0)||(_tableSort.col!=='spend'&&hasCr);
+    // With a filter on, say how many of the group's creatives are listed — the row's numbers still
+    // cover all of them, so without this a group with hidden sub-rows looks like a mismatch.
+    var _shown=g.creatives.filter(function(c){return visibleCids[String(c.creative_id)];}).length;
+    var shownHint=(_filterActive&&hasCr)
+      ? ' <span style="font-size:var(--f7);color:var(--tx3);font-weight:500" title="The numbers on this row cover all '+g.creatives.length+' creatives; the filter only hides rows">('+_shown+' of '+g.creatives.length+' shown)</span>'
+      : '';
     var cov;
     if(!hasCr)cov='<span class="fc-st"><span class="dot" style="background:var(--rd)"></span><span style="color:var(--rd)">Missing</span></span>';
     else if(g.active>0)cov='<span class="fc-st"><span class="dot" style="background:var(--gn)"></span><span style="color:var(--gn)">'+g.active+' active'+(g.paused>0?', '+g.paused+' paused':'')+'</span></span>';
@@ -2590,7 +2604,7 @@ function renderMergedTable(){
     if(!pipelineH)pipelineH='&mdash;';
     var roasStyle=wRoas!=null&&wRoas<(R.kpiTarget||0)?'color:var(--rd);font-weight:600':'';
     h+='<tr class="fc-group'+(autoExpand?' open':'')+'" data-gi="'+gi+'">';
-    h+='<td style="text-align:left"><span class="fc-arr">&#9658;</span> '+g.name+(autoExpand?' <span style="font-size:8px;color:var(--peri)">'+groupMatchCids.length+' match</span>':'')+'</td><td>'+cov+'</td>';
+    h+='<td style="text-align:left"><span class="fc-arr">&#9658;</span> '+g.name+shownHint+(autoExpand?' <span style="font-size:8px;color:var(--peri)">'+groupMatchCids.length+' match</span>':'')+'</td><td>'+cov+'</td>';
     if(!hc['freshness'])h+='<td>'+fresh+'</td>';
     h+='<td class="mono">'+(g.spend>0?'$'+Math.round(g.spend).toLocaleString():'&mdash;')+'</td>';
     h+='<td>'+sowBar+'</td>';
@@ -2618,6 +2632,7 @@ function renderMergedTable(){
     var fmtAvgRpa=fmtRpaVals.length>0?fmtRpaVals.reduce(function(s,v){return s+v;},0)/fmtRpaVals.length:null;
     // topCid no longer used — topCidSet used for all Top Creative logic
     sortCreatives(g.creatives).forEach(function(c,ci){
+      if(!visibleCids[String(c.creative_id)])return;   // filtered out — the group's numbers keep it
       var cid=String(c.creative_id);
       // Apply performance filter
       if(_perfFilter==='top'     &&!topCidSet[cid])    return;
