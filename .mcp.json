@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "creative-mcp": {
+      "command": "/Users/slai/Documents/Creative Analyser/python-virtual-environment/bin/python3",
+      "args": ["/Users/slai/Documents/Creative Analyser/creative_mcp.py"]
+    }
+  }
+}

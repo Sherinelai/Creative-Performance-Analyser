@@ -1,0 +1,37 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+python-virtual-environment
+
+# OAuth client secrets and token cache — NEVER commit
+auth/
+credentials.json
+google-api-credentials.json
+service_account.json
+service-account*.json
+token.json
+looker.ini
+
+# Query logs (empirical, local only)
+logs/
+
+# Claude local settings (keep only the tracked settings.json + prompt txts)
+.claude/*
+!.claude/settings.json
+!.claude/gas-escape-reminder.txt
+!.claude/learnings-capture-prompt.txt
+!.claude/git-commit-checkpoint-prompt.txt
+
+# Misc
+.DS_Store
+notes/
+.vscode/
+package.json
+package-lock.json

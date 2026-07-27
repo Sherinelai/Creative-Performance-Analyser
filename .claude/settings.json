@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v jq >/dev/null 2>&1 || exit 0; input=$(cat); cmd=$(printf '%s' \"$input\" | jq -r '.tool_input.command // empty' 2>/dev/null); printf '%s' \"$cmd\" | grep -q 'clasp push' || exit 0; git -C \"${CLAUDE_PROJECT_DIR:-.}\" show --name-only --pretty=format: HEAD 2>/dev/null | grep -qE 'dashboard.html|Code.js' || exit 0; msg=$(cat \"${CLAUDE_PROJECT_DIR:-.}/.claude/gas-escape-reminder.txt\" 2>/dev/null); [ -n \"$msg\" ] || exit 0; jq -n --arg c \"$msg\" '{hookSpecificOutput:{hookEventName:\"PreToolUse\",additionalContext:$c}}'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v jq >/dev/null 2>&1 || exit 0; input=$(cat); active=$(printf '%s' \"$input\" | jq -r '.stop_hook_active // false' 2>/dev/null); [ \"$active\" = \"true\" ] && exit 0; tp=$(printf '%s' \"$input\" | jq -r '.transcript_path // empty' 2>/dev/null); sid=$(printf '%s' \"$input\" | jq -r '.session_id // \"nosession\"' 2>/dev/null); [ -n \"$tp\" ] && [ -f \"$tp\" ] || exit 0; cur=$(wc -c < \"$tp\" 2>/dev/null | tr -d ' '); [ -n \"$cur\" ] || exit 0; marker=\"/tmp/automem-learnings-${sid}\"; last=$(cat \"$marker\" 2>/dev/null || echo 0); [ $((cur - last)) -ge 150000 ] || exit 0; if [ -f \"$marker\" ] && [ -n \"$(find \"$marker\" -mmin -30 2>/dev/null)\" ]; then exit 0; fi; echo \"$cur\" > \"$marker\"; prompt=$(cat \"${CLAUDE_PROJECT_DIR:-.}/.claude/learnings-capture-prompt.txt\" 2>/dev/null); [ -n \"$prompt\" ] || exit 0; gitprompt=$(cat \"${CLAUDE_PROJECT_DIR:-.}/.claude/git-commit-checkpoint-prompt.txt\" 2>/dev/null); target=\"LEARNINGS.d/${sid}.md\"; jq -n --arg r \"$prompt\" --arg g \"$gitprompt\" --arg t \"$target\" '{decision:\"block\", reason:($r + \"  Write ONLY to \" + $t + \" (your own session file; create it if absent). Never edit LEARNINGS.md or any other session file; that is the write race.  \" + $g)}'"
+          }
+        ]
+      }
+    ]
+  }
+}
