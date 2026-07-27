@@ -728,6 +728,16 @@ function loadDummy(type){
   perfs.forEach(function(c){if(!c.flags)c.flags=[];});
   // ciDashboardSetup fallback (Analysis.gs normally provides this)
   d.ciDashboardSetup = d.ciDashboardSetup || {model_type:'--',primary_metric:'--',secondary_metric:'--',variance_level:'--'};
+  // A metric-less queued creative, mirroring what the server appends for creatives stuck in the
+  // throttle queue (never served → no analytics row at all). Present in the demo so the render
+  // smoke test exercises every path with all-null metrics.
+  perfs.push({creative_id:9999,external_id:'demo9999x',competing_group:'phone-portrait-vast-30s',
+    ad_format:'phone-portrait-vast-30s',status:'active',created_date:'2026-07-20',
+    lifecycle_state:'queuing',is_queuing:true,is_metricless:true,spend:0,revenue:0,
+    roas:null,roas_d1:null,rpa:null,rpi:null,iti:null,ipm:null,installs:null,impressions:null,
+    target_events_d7:null,sow_pct:0,variance:null,ci_range:null,rpa_ci_range:null,
+    perf_class:null,flags:[],paused_date:null});
+
   // Demo-only lifecycle_state. The three states are mutually exclusive, so is_queuing in the
   // DUMMY rows means lifecycle_state 'queuing' — not 'exploring' with a flag.
   perfs.forEach(function(c){

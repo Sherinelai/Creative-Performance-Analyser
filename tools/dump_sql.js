@@ -54,6 +54,8 @@ const wanted = {
   optimizing: `buildOptimizingSQL(${campaignId})`,
   dailyFmt: `buildDailyFormatMetricsSQL(${campaignId}, ${lookbackDays})`,
   meta: `buildCampaignMetaSQL(${campaignId})`,
+  dailyCr: `buildDailyCreativeMetricsSQL(${campaignId}, ${lookbackDays})`,
+  impInst: `buildImpressionInstallSQL(${campaignId}, ${lookbackDays})`,
 };
 
 const out = {};

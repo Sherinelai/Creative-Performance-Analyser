@@ -141,6 +141,15 @@ therefore carries all three; `is_queuing` remains only as an alias. Before this 
 queuing was collapsed into `'exploring'` with `is_queuing` as a side flag, so a queuing creative
 matched both the queuing and the exploring filter and **counted twice** in the pipeline totals.
 
+**The queue is invisible to activity-driven queries.** A `queuing` creative is `current_status =
+'excluded'` — not being served — so it has no rows in `analytics.daily_attr_event_d7`, and *both* the
+perf query and the misleadingly-named "inventory" query are driven by that table over the lookback
+window. Verified on campaign 41535: 16 queuing, only 3 with any analytics data. `fetchCreativeData`
+therefore **appends a metric-less row** for each queued creative missing from `creativePerf`
+(`is_metricless: true`, spend/revenue 0, every rate null) so the table shows *which* creatives are
+stuck. Every metric cell in `Dashboard.html` is already `!= null` guarded and falls back to `—`, and
+the demo fixtures include one such row so `render_smoke_test.js` keeps that path covered.
+
 The 25K-impressions / 7-days rule is what makes the *platform* flip `is_currently_optimizing` — not
 a definition to recompute. `mcoLifecycleStateProxy()` is the only place that guesses from
 impressions + age; it runs solely when the PDT returned no state for an active creative, and it can

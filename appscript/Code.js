@@ -1375,6 +1375,53 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
         optimizing: { total: Object.keys(optimizingSet).length, displayed: displayedIn(optimizingSet) }
       };
       Logger.log('Lifecycle counts (total/displayed): ' + JSON.stringify(result.lifecycleCounts));
+
+      // ── Surface the invisible queue ──────────────────────────────────────────
+      // Add a row for every queued creative that has no analytics data, so the table shows
+      // WHICH creatives are stuck waiting instead of silently omitting them. These rows carry
+      // no metrics by definition (never served): spend/revenue are 0, every rate is null, and
+      // is_metricless marks them so the UI renders '—' rather than a misleading 0.
+      // They cannot be classified (perf_class needs variance, which needs a confidence
+      // interval), and they are excluded from metric averages by the null checks already in
+      // place. Only the queue is patched this way — exploring/optimizing creatives are being
+      // served, so they are already in creativePerf.
+      var present = {};
+      (result.creativePerf || []).forEach(function(cp) { present[String(cp.creative_id)] = true; });
+      var added = 0;
+      (b2.queuing || []).forEach(function(r) {
+        var cid = r.creative_id;
+        if (cid == null || String(cid) === '1' || present[String(cid)]) return;
+        var fmt = r.inventory_format || null;
+        result.creativePerf.push({
+          creative_id: cid,
+          external_id: r.external_id || null,
+          ad_format: fmt,
+          competing_group: fmt,
+          mco_group: toMcoGroup(fmt || ''),
+          status: normState(r.creative_state),
+          created_date: r.created_at || null,
+          lifecycle_state: 'queuing',
+          is_queuing: true,
+          is_metricless: true,          // never served — no analytics row exists
+          spend: 0, revenue: 0,
+          roas: null, roas_d1: null, rpa: null, rpi: null, iti: null, ipm: null,
+          installs: null, impressions: null, target_events_d7: null,
+          sow_pct: 0, variance: null, ci_range: null, rpa_ci_range: null,
+          roas_lower_ci: null, roas_upper_ci: null, rpa_lower_ci: null, rpa_upper_ci: null,
+          rpa_ci_delta: null, perf_class: null, flags: [],
+          paused_date: null, pause_method: null
+        });
+        present[String(cid)] = true;
+        added++;
+      });
+      if (added) {
+        result.queuedRowsAdded = added;
+        result.totalCreatives = (result.creativePerf || []).length;
+        // Recount now that the queue is in the table, so displayed matches total and the
+        // recommendation stops saying "N not in the table".
+        result.lifecycleCounts.queuing.displayed = displayedIn(queuingSet);
+        Logger.log('Added ' + added + ' metric-less queued creative rows');
+      }
     } catch(e) { Logger.log('Lifecycle/queuing parse failed: ' + e.message); }
 
     // Parse target event name
@@ -1978,12 +2025,17 @@ function buildQueueingSQL(campaignId) {
     var qPdt = getQueuePDT();
     return [
       "WITH pinpoint__creatives_simple AS (",
-      "  SELECT c.id, c.external_id, c.state FROM pinpoint.public.creatives c",
+      "  SELECT c.id, c.external_id, c.state, c.created_at FROM pinpoint.public.creatives c",
       "),",
       "pinpoint__campaigns_creatives AS (SELECT * FROM pinpoint.public.campaigns_creatives)",
       "SELECT DISTINCT",
       "  pinpoint__creatives_simple.external_id AS external_id,",
-      "  pinpoint__creatives_simple.id          AS creative_id",
+      "  pinpoint__creatives_simple.id          AS creative_id,",
+      // Needed to render queued creatives as metric-less rows: they never serve, so they have
+      // no analytics data and these are the only attributes available for them.
+      "  pinpoint__creatives_simple.state       AS creative_state,",
+      "  pinpoint__creatives_simple.created_at  AS created_at,",
+      "  queue_creative_statistics.inventory_format AS inventory_format",
       "FROM " + qPdt + " AS queue_creative_statistics",
       "LEFT JOIN pinpoint__creatives_simple ON queue_creative_statistics.creative_id = pinpoint__creatives_simple.id",
       "LEFT JOIN pinpoint__campaigns_creatives ON CAST(queue_creative_statistics.creative_id AS INT) = CAST(pinpoint__campaigns_creatives.creative_id AS INT)",
