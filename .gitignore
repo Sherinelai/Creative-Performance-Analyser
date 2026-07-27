@@ -25,7 +25,7 @@ logs/
 # Claude local settings (keep only the tracked settings.json + prompt txts)
 .claude/*
 !.claude/settings.json
-!.claude/gas-escape-reminder.txt
+!.claude/gas-push-checklist.txt
 !.claude/learnings-capture-prompt.txt
 !.claude/git-commit-checkpoint-prompt.txt
 

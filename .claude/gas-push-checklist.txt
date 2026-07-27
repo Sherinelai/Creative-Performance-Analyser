@@ -1,0 +1,30 @@
+⚠️ Pre-push checklist for appscript/ (Code.js / Dashboard.html changed in the last commit).
+
+DEPLOY
+  • `clasp push -f` from appscript/ — without -f a non-interactive shell prints "Skipping push." and
+    uploads NOTHING. If the output does not list the changed files, the push FAILED.
+  • push only updates the HEAD version. The /exec web app keeps serving the OLD code until you
+    redeploy (`clasp create-deployment`, or Deploy → Manage deployments in the editor).
+
+DASHBOARD.HTML
+  • Served with createHtmlOutputFromFile (NOT createTemplate) — there are no <?= ?> scriptlets and no
+    GAS-side escaping of the file. If you ever switch to a template, every ${...} and \' in it starts
+    being processed by GAS first and will silently break the browser JS.
+  • It is one file: inline CSS + JS + markup, ~3.1k lines. Client JS runs in the browser sandbox —
+    `google.script.run` is async with no return value; use .withSuccessHandler/.withFailureHandler.
+
+CODE.JS
+  • V8 runtime, but the file is written in ES5 style (var, function(){}). Match it.
+  • Every new query must go through runSQL / runSQLParallel — one statement per call.
+  • New tables/columns: verify with run_trino (creative-mcp) BEFORE pushing. The
+    looker.*cstudio__creative_format* PDT name is dated — use getPDT(), never a literal.
+  • Respect DATA_BAKE_DAYS = 7 (attribution not settled) or the metric reads low.
+
+CONSISTENCY (things that exist in more than one place — change all of them or none)
+  • MCO group mapping: MCO_GROUP_MAP_GS (Code.js), DN_TO_BASE (fetchCreativeData), invToDN (Dashboard.html)
+  • MCO rules/diagnosis codes: skills/mco-creative-explainer/SKILL.md, MCO_SYSTEM_PROMPT_FALLBACK,
+    the Drive SKILL_FILE_ID/KB_FILE_ID files, and localMcoDiagnosis in Dashboard.html
+
+SECRETS
+  • No API keys or client secrets in source — Script Properties only (CLAUDE_API_KEY,
+    LOOKER_CLIENT_SECRET, SKILL_FILE_ID, KB_FILE_ID).

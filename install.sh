@@ -13,12 +13,11 @@ if [ ! -x "$PY" ]; then
 fi
 
 echo "Installing dependencies ..."
-uv pip install --python "$PY" \
-  mcp looker-sdk gspread gspread-dataframe google-auth google-auth-oauthlib \
-  google-cloud-bigquery db-dtypes pandas numpy pyarrow
+uv pip install --python "$PY" mcp looker-sdk
 
 echo
 echo "Done. Next:"
-echo "  1. Put your own auth/looker.ini (mint your own Looker API3 keys) + Google creds in auth/."
+echo "  1. Put your own auth/looker.ini (mint your own Looker API3 keys) in auth/."
 echo "  2. Verify: $PY -c \"import creative_mcp as m; print(m.list_trino_connections())\""
 echo "  3. The creative-mcp server auto-registers via .mcp.json in Claude Code."
+echo "  4. For the Apps Script app: npm i -g @google/clasp && clasp login, then work in appscript/."

@@ -1,45 +1,54 @@
 """
 Creative Performance Analyser — MCP Server
 
-Reuses the tiktok-dashboard Looker/Trino access layer, tailored to creative-grain analysis.
+The one job of this file: give Claude Code the SAME data access the Apps Script dashboard
+(appscript/) has, so a query can be verified here before it is written into Code.js.
 
 The Looker API creds in auth/looker.ini reach a Trino connection literally named
-`accelerate_trino` — the SAME data as the claude.ai-hosted "Accelerate Trino" connector. So
-creative Trino cuts can be BUILT and RUN in code here, without the claude.ai connector.
+`accelerate_trino` — the same connection `runSQL()` / `runSQLParallel()` in appscript/Code.js post to
+via /api/4.0/sql_queries, and the same data as the claude.ai-hosted "Accelerate Trino" connector.
+So every SQL builder in the dashboard can be run and diffed from here, with no connector.
 
 Tools:
-  set_session(label)                 — tag this analysis session in query logs
-  list_trino_connections()           — sanity check: which Trino connections the creds reach
-  build_creative_sql(...)            — fill trino-migration/sql/get_re_creatives.sql params, ready to run
-  run_trino(sql)                     — run ONE Trino statement via Looker SQL Runner, return JSON rows
+  set_session(label)        — tag this analysis session in logs/mcp_queries.jsonl
+  list_trino_connections()  — sanity check: which Trino connections the creds reach
+  run_trino(sql)            — run ONE Trino statement via Looker SQL Runner, return JSON rows
 
-Primary UA creative workflow (Android = pure BigQuery, iOS = Looker GR ÷ BQ DNU) lives in
-skills/poor-performing-creatives/ — see that SKILL.md. This server serves the Trino access layer
-those cuts and any ad-hoc creative investigation depend on.
+Typical loop when re-architecting a dashboard query:
+  1. Pull the SQL the dashboard sends — e.g. `buildCreativeLevelPerfSQL()` in appscript/Code.js.
+  2. run_trino(that_sql) here; inspect the real rows and column names.
+  3. Change the SQL here until it is right, THEN edit Code.js and `clasp push -f`.
+Never guess a column name from Code.js alone — the PDT and cstudio tables drift.
 
-Source of truth:
-  Trino (hive.analytics.daily):  creative-grain gross revenue / events / rpa (Looker SQL Runner)
-  BigQuery:                      client-truth DNU (see the skill)
+Tables the dashboard depends on (all reachable from run_trino):
+  pinpoint.public.*                     campaigns, creatives, creative_events,
+                                        creative_state_events, creative_selection_configurations, apps
+  hive.bi.cstudio_analytics_daily_v1    MCO status + optimization_state + creative daily metrics
+  analytics.daily / trimmed_daily       spend / revenue / installs
+  analytics.daily_attr_event_d7         target-event attribution (RPA)
+  looker.*cstudio__creative_format*     PDT, name is dated — auto-discover it the way getPDT() does:
+                                        SHOW TABLES FROM looker LIKE '%cstudio__creative_format%'
 
-Looker gotchas (from tiktok-dashboard/CLAUDE.md — preserved here):
+Looker gotchas (hard-won, keep them):
   - looker.ini has NO scheme — prepend https:// in code (done in _init_looker).
+  - Do NOT use raw `requests` against /api/4.0/login: it returns 200 but the token 401s everywhere
+    after. Only the official looker-sdk works from Python. (Apps Script's UrlFetchApp is fine —
+    that path is what getAccessToken() in Code.js uses.)
   - Python 3.14 + cattrs: patch converter40 before init40() or run_* raises StructureHandlerNotFound.
   - SQL Runner runs ONE statement. For a multi-statement file, split on the WITH/SELECT boundary,
     NOT on ';' (a ';' inside an inline comment truncates the statement).
 
 To run:
-  uv pip install mcp looker-sdk gspread google-auth google-auth-oauthlib google-cloud-bigquery \
-      db-dtypes pandas --python ./python-virtual-environment/bin/python3
-  python creative_mcp.py
+  bash install.sh          # creates the venv + installs deps
+  python creative_mcp.py   # or let .mcp.json start it inside Claude Code
 """
 
 import json
 import logging
 import os
 import typing
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -48,11 +57,10 @@ mcp = FastMCP("creative-mcp")
 # ── Paths ─────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).parent
 LOOKER_INI = ROOT / "auth" / "looker.ini"
-CREATIVES_SQL = ROOT / "trino-migration" / "sql" / "get_re_creatives.sql"
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-CUSTOMER_ID = "968"                    # TikTok on the Liftoff side
-TRINO_CONNECTION = "accelerate_trino"  # the RE/analytics Trino connection reached by these creds
+# Same connection name as SQL_CONN in appscript/Code.js — keep the two in sync.
+TRINO_CONNECTION = "accelerate_trino"
 
 # ── Query logging ─────────────────────────────────────────────────────────────
 LOG_DIR = ROOT / "logs"
@@ -167,79 +175,11 @@ def list_trino_connections() -> str:
 
 
 @mcp.tool()
-def build_creative_sql(
-    campaign_ids: list,
-    geo: Optional[str] = None,
-    start_dt: Optional[str] = None,
-    end_dt: Optional[str] = None,
-    top_n: int = 20,
-    campaign_type: str = "reengagement",
-) -> str:
-    """Build the creative-grain performance SQL (from trino-migration/sql/get_re_creatives.sql),
-    params pre-filled, ready to run via run_trino() or the Accelerate Trino connector.
-
-    Returns creative_id + config dims (type/size/language/interactive/video_length) + gross
-    revenue (advertiser cost, NOT spend), target_events, and rpa (revenue ÷ events), top_n by GR.
-
-    EVENT BASIS: default target_events, no custom_event_name filter (filtering zeroes revenue).
-    Always state the basis when reporting. `creative_name` is not in `daily` — creative_id is the key.
-
-    Args:
-        campaign_ids: list of campaign IDs (numeric strings or ints). Required.
-        geo: ISO country, e.g. "SA". Recommended — drops $0 cross-geo bid noise. None → all geos
-             (the `AND country = :geo` line is dropped).
-        start_dt / end_dt: full literals "YYYY-MM-DDT00:00:00Z"; end EXCLUSIVE; complete days only.
-             Defaults: end = today(UTC)-2d at 00:00Z (warehouse lags ~2d), start = end - 7d.
-        top_n: creatives ranked by full-window GR (default 20).
-        campaign_type: 'reengagement' (RE, default) or 'user_acquisition' (UA). The seeded SQL is
-             RE-validated; for UA set this — the query shape is identical.
-
-    Returns the ready-to-run single SQL statement as text.
-    """
-    def _fmt(d: datetime) -> str:
-        return d.strftime("%Y-%m-%dT00:00:00Z")
-
-    if end_dt:
-        end = datetime.strptime(end_dt[:10], "%Y-%m-%d")
-    else:
-        end = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=2)
-    if start_dt:
-        start = datetime.strptime(start_dt[:10], "%Y-%m-%d")
-    else:
-        start = end - timedelta(days=7)
-
-    ids = ",".join(str(c).strip() for c in campaign_ids if str(c).strip())
-    if not ids:
-        raise ValueError("campaign_ids is required and must be non-empty")
-
-    sql = CREATIVES_SQL.read_text(encoding="utf-8")
-    if geo:
-        sql = sql.replace(":geo", f"'{geo.upper()}'")
-    else:
-        sql = "\n".join(line for line in sql.splitlines() if "country = :geo" not in line)
-    sql = (
-        sql.replace("campaign_type = 'reengagement'", f"campaign_type = '{campaign_type}'")
-           .replace(":campaign_ids", ids)
-           .replace(":start_dt", f"'{_fmt(start)}'")
-           .replace(":end_dt", f"'{_fmt(end)}'")
-           .replace(":top_n", str(int(top_n)))
-    )
-
-    scope = f"geo={geo.upper()}" if geo else "geo=ALL"
-    guide = (
-        f"-- Creative performance | {scope} | type={campaign_type} | "
-        f"{_fmt(start)} -> {_fmt(end)} (exclusive) | top_n={top_n}\n"
-        f"-- BASIS: default target_events (no custom_event_name filter). GR = advertiser cost, not spend.\n"
-        f"-- Run via run_trino() (accelerate_trino) or the Accelerate Trino connector.\n\n"
-    )
-    return guide + sql
-
-
-@mcp.tool()
 def run_trino(sql: str) -> str:
     """Run ONE Trino statement on `accelerate_trino` and return the rows as JSON.
 
-    Use for creative cuts built by build_creative_sql, or any ad-hoc creative-grain query.
+    Use to verify or iterate on any SQL the dashboard sends (the build*SQL() functions in
+    appscript/Code.js), or for ad-hoc creative-grain investigation.
     SQL Runner runs a SINGLE statement — do not pass a multi-statement script.
 
     Args:

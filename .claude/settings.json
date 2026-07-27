@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v jq >/dev/null 2>&1 || exit 0; input=$(cat); cmd=$(printf '%s' \"$input\" | jq -r '.tool_input.command // empty' 2>/dev/null); printf '%s' \"$cmd\" | grep -q 'clasp push' || exit 0; git -C \"${CLAUDE_PROJECT_DIR:-.}\" show --name-only --pretty=format: HEAD 2>/dev/null | grep -qE 'dashboard.html|Code.js' || exit 0; msg=$(cat \"${CLAUDE_PROJECT_DIR:-.}/.claude/gas-escape-reminder.txt\" 2>/dev/null); [ -n \"$msg\" ] || exit 0; jq -n --arg c \"$msg\" '{hookSpecificOutput:{hookEventName:\"PreToolUse\",additionalContext:$c}}'"
+            "command": "command -v jq >/dev/null 2>&1 || exit 0; input=$(cat); cmd=$(printf '%s' \"$input\" | jq -r '.tool_input.command // empty' 2>/dev/null); printf '%s' \"$cmd\" | grep -q 'clasp push' || exit 0; git -C \"${CLAUDE_PROJECT_DIR:-.}\" show --name-only --pretty=format: HEAD 2>/dev/null | grep -qiE 'dashboard\\.html|code\\.js' || exit 0; msg=$(cat \"${CLAUDE_PROJECT_DIR:-.}/.claude/gas-push-checklist.txt\" 2>/dev/null); [ -n \"$msg\" ] || exit 0; jq -n --arg c \"$msg\" '{hookSpecificOutput:{hookEventName:\"PreToolUse\",additionalContext:$c}}'"
           }
         ]
       }
