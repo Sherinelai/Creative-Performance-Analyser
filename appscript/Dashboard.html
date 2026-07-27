@@ -1394,7 +1394,7 @@ function requestAiInsights(){
     device_targeting:R.deviceTargeting||'unknown',
     formatMetrics:fmForAI,
     dailyFormatMetrics:(R.dailyFormatMetrics||[]).slice(0,200),
-    typeBreakdown:R.typeBreakdown
+    typeBreakdown:bdForAI()
   };
   if(_isAppsScript){
     google.script.run
@@ -2196,8 +2196,8 @@ function setBdChart(type, ctx){
   if(el)el.innerHTML=buildBreakdownInner();
 }
 
-function buildBreakdownInner(){
-  var agg=aggregateBreakdown();
+function buildBreakdownInner(agg){
+  agg=agg||aggregateBreakdown();
   var vColors={'Video':C_VIDEO,'Non-video':C_NON_VIDEO};
   var iColors={'Interactive':C_INTERACTIVE,'Not Interactive':C_NOT_INTERACTIVE,'N/A':'#95A2BC'};
   return buildBdChart('Video vs Non-video',agg.videoMap,vColors,_bdChart['video']||'bar','video')+
@@ -2207,10 +2207,14 @@ function buildBreakdownInner(){
 function renderBreakdownCharts(){
   var perfs=R.creativePerf||[];
   if(!perfs.length)return '';
-  var tb=R.typeBreakdown||[];
-  var videoAI=localVideoSummary(tb);
-  var interAI=localInteractiveSummary(tb);
-  var h='<div class="breakdown-row" id="breakdownSection">'+buildBreakdownInner()+'</div>';
+  // ONE aggregate feeds the charts AND the prose underneath them. They used to disagree: the charts
+  // read creativePerf with the format table's weighted ratio-of-sums, while the summaries read
+  // R.typeBreakdown — a separate query with its own window — and averaged per-creative ratios
+  // unweighted. A caption could name a different winner than the chart it sits under.
+  var agg=aggregateBreakdown();
+  var videoAI=localVideoSummary(agg);
+  var interAI=localInteractiveSummary(agg);
+  var h='<div class="breakdown-row" id="breakdownSection">'+buildBreakdownInner(agg)+'</div>';
   // Separate AI analyses below the charts
   h+='<div class="breakdown-row" style="margin-top:0">';
   h+='<div style="padding:0 2px">';
@@ -2222,84 +2226,102 @@ function renderBreakdownCharts(){
   return h;
 }
 
-function localVideoSummary(tb){
-  var isPrimRpa=R&&R._isCpa;
-  var perfLabel=isPrimRpa?'RPA':'7D ROAS';
-  var video={spend:0,roasS:0,roasN:0,rpiS:0,rpiN:0,count:0};
-  var nonvideo={spend:0,roasS:0,roasN:0,rpiS:0,rpiN:0,count:0};
-  tb.forEach(function(r){
-    var b=String(r.is_video)==='true'?video:nonvideo;
-    b.spend+=r.spend;b.count+=r.creative_count;
-    if(r.rpi!=null){b.rpiS+=r.rpi;b.rpiN++;}
-    if(r.roas_d7!=null){b.roasS+=r.roas_d7;b.roasN++;}
-  });
-  var total=(video.spend+nonvideo.spend)||1;
-  var vPct=(video.spend/total*100).toFixed(0),nvPct=(nonvideo.spend/total*100).toFixed(0);
-  var vRoas=video.roasN>0?video.roasS/video.roasN:null;
-  var nvRoas=nonvideo.roasN>0?nonvideo.roasS/nonvideo.roasN:null;
-  var vRpi=video.rpiN>0?video.rpiS/video.rpiN:null;
-  var nvRpi=nonvideo.rpiN>0?nonvideo.rpiS/nonvideo.rpiN:null;
+/**
+ * One slice of a breakdown map, in the shape the summaries read. The S/N pairs finalize() writes
+ * already hold the WEIGHTED value (ratio-of-sums) with N=1, so S/N is exactly the number
+ * buildBdChart plots for that slice.
+ */
+function bdBucket(map,label){
+  var m=(map||{})[label]||{};
+  return {label:label,spend:m.spend||0,count:m.count||0,
+    roas:(m.roasN>0?m.roasS/m.roasN:null),
+    rpa:(m.rpaN>0?m.rpaS/m.rpaN:null),
+    rpi:(m.rpiN>0?m.rpiS/m.rpiN:null)};
+}
+
+/** Spend across EVERY slice including 'N/A' — the same denominator buildBdChart uses for its %. */
+function bdTotalSpend(map){
+  return Object.keys(map||{}).reduce(function(s,k){return s+(map[k].spend||0);},0)||1;
+}
+
+/**
+ * The bullets both breakdown summaries share: the spend split, the primary-metric comparison and
+ * the RPI comparison. Which metric and which direction come from METRICS via the server, so a CPA
+ * campaign's caption talks about RPA (lower=better) instead of hardcoding "7D ROAS".
+ */
+function bdSharedBullets(map,aLabel,bLabel){
+  var a=bdBucket(map,aLabel),b=bdBucket(map,bLabel),total=bdTotalSpend(map);
+  var pk=primaryMetricKey(R.campType),lowerBetter=isCostMetric(pk);
+  var aPct=(a.spend/total*100).toFixed(0),bPct=(b.spend/total*100).toFixed(0);
+  var aV=pk==='rpa'?a.rpa:a.roas,bV=pk==='rpa'?b.rpa:b.roas;
+  var fmt=function(v){return lowerBetter?'$'+v.toFixed(2):(v*100).toFixed(1)+'%';};
   var bullets=[];
-  bullets.push('<b>Video</b> '+vPct+'% of spend ('+video.count+' creatives) &middot; <b>Non-video</b> '+nvPct+'% ('+nonvideo.count+' creatives)');
-  if(vRoas!=null&&nvRoas!=null){
-    var vR=(vRoas*100).toFixed(1),nvR=(nvRoas*100).toFixed(1);
-    var winner=vRoas>nvRoas?'<b style="color:var(--gn)">Video leads</b>':'<b style="color:var(--gn)">Non-video leads</b>';
-    bullets.push('7D ROAS — Video <b>'+vR+'%</b> vs Non-video <b>'+nvR+'%</b> &rarr; '+winner);
+  bullets.push('<b>'+aLabel+'</b> '+aPct+'% of spend ('+a.count+' creatives) &middot; <b>'+bLabel+'</b> '+bPct+'% ('+b.count+' creatives)');
+  var lead=null;
+  if(aV!=null&&bV!=null){
+    lead=(aV===bV)?null:((lowerBetter?aV<bV:aV>bV)?a:b);
+    bullets.push(metricLabel(pk)+' — '+aLabel+' <b>'+fmt(aV)+'</b> vs '+bLabel+' <b>'+fmt(bV)+'</b>'+
+      (lead?' &rarr; <b style="color:var(--gn)">'+lead.label+' leads</b>':''));
   }
-  if(vRpi!=null&&nvRpi!=null){
-    var cheaper=vRpi<nvRpi?'<b style="color:var(--gn)">Video cheaper</b>':'<b style="color:var(--gn)">Non-video cheaper</b>';
-    bullets.push('Install cost (RPI) — Video <b>$'+vRpi.toFixed(1)+'</b> vs Non-video <b>$'+nvRpi.toFixed(1)+'</b> &rarr; '+cheaper);
+  if(a.rpi!=null&&b.rpi!=null){
+    var rpiLower=metricDef('rpi')?isCostMetric('rpi'):true;
+    var cheap=(rpiLower?a.rpi<b.rpi:a.rpi>b.rpi)?aLabel:bLabel;
+    bullets.push('Install cost (RPI) — '+aLabel+' <b>$'+a.rpi.toFixed(1)+'</b> vs '+bLabel+' <b>$'+b.rpi.toFixed(1)+'</b> &rarr; <b style="color:var(--gn)">'+cheap+' cheaper</b>');
   }
-  if(vRoas!=null&&nvRoas!=null){
-    var gap=Math.abs(vRoas-nvRoas)/Math.max(vRoas,nvRoas);
-    if(gap>0.1){
-      var weak=vRoas>nvRoas?'Non-video':'Video';
-      var weakPct=weak==='Video'?vPct:nvPct;
-      bullets.push('<span style="color:var(--am)">Note:</span> '+weak+' uses '+weakPct+'% of spend but underperforms on '+perfLabel+'. '+(R.mcoEnabled?'Format-level spend is determined by ML pricing, not MCO. MCO only selects creatives within each ad group by ITI':'Consider rebalancing creative mix'));
-    }
-  }
-  if(R.mcoEnabled)bullets.push('<span style="color:var(--peri)">MCO context:</span> Creative selection is ITI-based. Video creatives typically have higher ITI due to user engagement — MCO may favor them regardless of ROAS/RPA.');
-  else bullets.push('<span style="color:var(--tx3)">Free-floating:</span> Creative selection is random. Spend should be roughly proportional to eligible creative count per type.');
+  return {bullets:bullets,a:a,b:b,aPct:aPct,bPct:bPct,aV:aV,bV:bV,lead:lead,
+          metricLabel:metricLabel(pk),lowerBetter:lowerBetter};
+}
+
+/** Render a bullet list, or '' when there is nothing to say. */
+function bdBulletList(bullets){
   return bullets.length?'<ul style="margin:0;padding-left:16px;list-style:disc">'+bullets.map(function(b){return '<li style="margin-bottom:3px">'+b+'</li>';}).join('')+'</ul>':'';
 }
 
-function localInteractiveSummary(tb){
-  var isPrimRpa=R&&R._isCpa;
-  var perfLabel=isPrimRpa?'RPA':'7D ROAS';
-  var interactive={spend:0,roasS:0,roasN:0,rpiS:0,rpiN:0,count:0};
-  var notInteractive={spend:0,roasS:0,roasN:0,rpiS:0,rpiN:0,count:0};
-  tb.forEach(function(r){
-    var b=r.interactive==='Interactive'?interactive:notInteractive;
-    b.spend+=r.spend;b.count+=r.creative_count;
-    if(r.rpi!=null){b.rpiS+=r.rpi;b.rpiN++;}
-    if(r.roas_d7!=null){b.roasS+=r.roas_d7;b.roasN++;}
-  });
-  var total=(interactive.spend+notInteractive.spend)||1;
-  var iPct=(interactive.spend/total*100).toFixed(0),niPct=(notInteractive.spend/total*100).toFixed(0);
-  var iRoas=interactive.roasN>0?interactive.roasS/interactive.roasN:null;
-  var niRoas=notInteractive.roasN>0?notInteractive.roasS/notInteractive.roasN:null;
-  var iRpi=interactive.rpiN>0?interactive.rpiS/interactive.rpiN:null;
-  var niRpi=notInteractive.rpiN>0?notInteractive.rpiS/notInteractive.rpiN:null;
-  var bullets=[];
-  bullets.push('<b>Interactive</b> '+iPct+'% of spend ('+interactive.count+' creatives) &middot; <b>Not Interactive</b> '+niPct+'% ('+notInteractive.count+' creatives)');
-  if(iRoas!=null&&niRoas!=null){
-    var iR=(iRoas*100).toFixed(1),niR=(niRoas*100).toFixed(1);
-    var winner=iRoas>niRoas?'<b style="color:var(--gn)">Interactive leads</b>':'<b style="color:var(--gn)">Not Interactive leads</b>';
-    bullets.push('7D ROAS — Interactive <b>'+iR+'%</b> vs Not Interactive <b>'+niR+'%</b> &rarr; '+winner);
+/** How far apart the two slices are on the primary metric, 0-1, or null when incomparable. */
+function bdGap(s){
+  if(s.aV==null||s.bV==null)return null;
+  var hi=Math.max(s.aV,s.bV);
+  return hi>0?Math.abs(s.aV-s.bV)/hi:null;
+}
+
+function localVideoSummary(agg){
+  var s=bdSharedBullets((agg||aggregateBreakdown()).videoMap,'Video','Non-video');
+  var bullets=s.bullets,gap=bdGap(s);
+  if(gap!=null&&gap>0.1&&s.lead){
+    var weak=s.lead.label==='Video'?{label:'Non-video',pct:s.bPct}:{label:'Video',pct:s.aPct};
+    bullets.push('<span style="color:var(--am)">Note:</span> '+weak.label+' uses '+weak.pct+'% of spend but underperforms on '+s.metricLabel+'. '+(R.mcoEnabled?'Format-level spend is determined by ML pricing, not MCO. MCO only selects creatives within each ad group by ITI':'Consider rebalancing creative mix'));
   }
-  if(iRpi!=null&&niRpi!=null){
-    var cheaper=iRpi<niRpi?'<b style="color:var(--gn)">Interactive cheaper</b>':'<b style="color:var(--gn)">Not Interactive cheaper</b>';
-    bullets.push('Install cost (RPI) — Interactive <b>$'+iRpi.toFixed(1)+'</b> vs Not Interactive <b>$'+niRpi.toFixed(1)+'</b> &rarr; '+cheaper);
-  }
-  if(iRoas!=null&&niRoas!=null){
-    var gap=Math.abs(iRoas-niRoas)/Math.max(iRoas,niRoas);
-    if(gap>0.1){
-      var strong=iRoas>niRoas?'Interactive':'Not Interactive';
-      bullets.push('<span style="color:var(--am)">Opportunity:</span> Consider adding more '+strong.toLowerCase()+' creatives — they show stronger '+perfLabel);
-    }
+  if(R.mcoEnabled)bullets.push('<span style="color:var(--peri)">MCO context:</span> Creative selection is ITI-based. Video creatives typically have higher ITI due to user engagement — MCO may favor them regardless of ROAS/RPA.');
+  else bullets.push('<span style="color:var(--tx3)">Free-floating:</span> Creative selection is random. Spend should be roughly proportional to eligible creative count per type.');
+  return bdBulletList(bullets);
+}
+
+function localInteractiveSummary(agg){
+  var s=bdSharedBullets((agg||aggregateBreakdown()).interMap,'Interactive','Not Interactive');
+  var bullets=s.bullets,gap=bdGap(s);
+  if(gap!=null&&gap>0.1&&s.lead){
+    bullets.push('<span style="color:var(--am)">Opportunity:</span> Consider adding more '+s.lead.label.toLowerCase()+' creatives — they show stronger '+s.metricLabel);
   }
   if(R.mcoEnabled)bullets.push('<span style="color:var(--peri)">MCO context:</span> Interactive creatives often have different ITI profiles. MCO selects purely on ITI — interactivity doesn\'t receive special treatment in selection.');
-  return bullets.length?'<ul style="margin:0;padding-left:16px;list-style:disc">'+bullets.map(function(b){return '<li style="margin-bottom:3px">'+b+'</li>';}).join('')+'</ul>':'';
+  return bdBulletList(bullets);
+}
+
+/**
+ * The breakdown numbers the AI narrates — the same aggregate the charts plot, so the narrative
+ * cannot contradict the donut above it. Replaces the raw typeBreak query rows in the payload.
+ */
+function bdForAI(){
+  var agg=aggregateBreakdown(),out=[];
+  [['video',agg.videoMap],['interactive',agg.interMap]].forEach(function(p){
+    Object.keys(p[1]).forEach(function(k){
+      var b=bdBucket(p[1],k);
+      out.push({dimension:p[0],value:k,spend:Math.round(b.spend),creative_count:b.count,
+        roas_d7:b.roas!=null?+b.roas.toFixed(4):null,
+        rpa:b.rpa!=null?+b.rpa.toFixed(2):null,
+        rpi:b.rpi!=null?+b.rpi.toFixed(2):null});
+    });
+  });
+  return out;
 }
 
 /* ═══════════════════════════════════════════════════════════
