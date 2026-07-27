@@ -155,6 +155,74 @@ var METRICS = {
 /** Which metric a campaign type is judged on. Used by _getPrimaryMetric and by the client. */
 var PRIMARY_METRIC_BY_CAMPAIGN_TYPE = { ua_cpr: 'roas', re: 'roas', ua_cpa: 'rpa', ua_cpi: 'rpi' };
 
+// ═══════════════════════════════════════════════════════════
+// PERFORMANCE CLASSIFICATION — SINGLE SOURCE for ★ Top / ↑ Campaign / ↑ Format / ⚠ Poor
+//
+// This drives BOTH the tags + filters in the "Creative Performance by Format" table and the
+// "Detach poor creatives" recommendation. It used to be implemented twice — once here for the
+// recommendation, once in Dashboard.html for the tags — with three divergences that made the
+// two disagree on screen:
+//   1. only the client applied the exclusivity cascade, so a creative above its format average
+//      was still "confirmed poor" in the recommendation while the table tagged it ↑ Format avg;
+//   2. only the server protected sole-active creatives, so the table could tag a creative Poor
+//      that the recommendation deliberately withheld;
+//   3. the server grouped by raw inventory_format while the table grouped by MCO Inventory
+//      Group, so "sole active in its group" counted different populations.
+// Now: classify once, stamp perf_class on each creative, and let both read it.
+//
+// All four classes require lowVar (variance === 'high' — narrow CI, high confidence):
+//   ★ Top        lowVar + RPI < campaign avg + primary metric better than campaign avg
+//   ↑ Campaign   lowVar + primary metric better than campaign avg
+//   ↑ Format     lowVar + primary metric better than its MCO-group average
+//   ⚠ Poor       lowVar + RPI > campaign avg + primary metric worse than campaign avg
+// Exclusivity: Top > Campaign > Format > Poor (a positive signal always beats Poor).
+// ═══════════════════════════════════════════════════════════
+function classifyCreativePerformance_(creatives, isCpa, campAvg) {
+  var list = creatives || [];
+
+  // Format-group averages, keyed by MCO Inventory Group (toMcoGroup) — the same grouping the
+  // table renders, so "above its format average" means the group the user is looking at.
+  var groups = {};
+  list.forEach(function(c) {
+    var g = c.mco_group || toMcoGroup(c.competing_group);
+    if (!groups[g]) groups[g] = { roas: [], rpa: [], active: 0 };
+    if (c.roas != null) groups[g].roas.push(c.roas);
+    if (c.rpa != null) groups[g].rpa.push(c.rpa);
+    if (c.status === 'active') groups[g].active++;
+  });
+  function mean(a) { return (a && a.length) ? a.reduce(function(s, v) { return s + v; }, 0) / a.length : null; }
+
+  list.forEach(function(c) {
+    var g = c.mco_group || toMcoGroup(c.competing_group);
+    var fmtRoas = mean(groups[g] && groups[g].roas), fmtRpa = mean(groups[g] && groups[g].rpa);
+    var lowVar = (c.variance === 'high');   // 'high' in the backend = narrow CI = high confidence
+
+    var betterThanCamp = isCpa
+      ? (c.rpa != null && campAvg.rpa != null && c.rpa < campAvg.rpa)
+      : (c.roas != null && campAvg.roas != null && c.roas > campAvg.roas);
+    var worseThanCamp = isCpa
+      ? (c.rpa != null && campAvg.rpa != null && c.rpa > campAvg.rpa)
+      : (c.roas != null && campAvg.roas != null && c.roas < campAvg.roas);
+    var betterThanFmt = isCpa
+      ? (c.rpa != null && fmtRpa != null && c.rpa < fmtRpa)
+      : (c.roas != null && fmtRoas != null && c.roas > fmtRoas);
+    var cheapInstall     = campAvg.rpi != null && c.rpi != null && c.rpi < campAvg.rpi;
+    var expensiveInstall = campAvg.rpi != null && c.rpi != null && c.rpi > campAvg.rpi;
+
+    var cls = null;
+    if (lowVar && betterThanCamp && cheapInstall) cls = 'top';
+    else if (lowVar && betterThanCamp)            cls = 'camp_avg';
+    else if (lowVar && betterThanFmt)             cls = 'fmt_avg';
+    else if (lowVar && expensiveInstall && worseThanCamp) cls = 'poor';
+
+    c.perf_class = cls;
+    // Sole active creative in its MCO group: never recommend detaching the last one.
+    c.is_sole_active_in_group = (c.status === 'active' && (groups[g] ? groups[g].active : 0) <= 1);
+  });
+
+  return list;
+}
+
 /** Render METRICS as the "metric reminders" block of the AI system prompt. */
 function metricsPromptBlock() {
   var L = ['## Metric definitions (authoritative)'];
@@ -1430,33 +1498,21 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
         if(campAvgRpa==null)campAvgRpa=cpRpaN>0?cpRpaS/cpRpaN:null;
       }
 
-      // Count active creatives per format group
-      var activePerGroup={};
-      merged.forEach(function(m){
-        if(m.status==='active'){
-          var grp=m.competing_group||m.ad_format||'unknown';
-          activePerGroup[grp]=(activePerGroup[grp]||0)+1;
-        }
-      });
+      // Classify every creative ONCE (see classifyCreativePerformance_ at the top of the file).
+      // It stamps perf_class + is_sole_active_in_group onto the rows the client renders, so the
+      // recommendation below and the table's ⚠ Poor tags can no longer disagree.
+      classifyCreativePerformance_(result.creativePerf || [],
+        isCpa, { roas: campAvgRoas, rpa: campAvgRpa, rpi: campAvgRpi });
 
-      // Find Poor Creatives: Low var CI + RPI > campaign avg + bad main metric
       var poorCids=[], poorPausedCids=[], soleActiveFormats=[];
-      merged.forEach(function(m){
-        var lowVar=(m.variance==='high'); // 'high' in backend = narrow CI = high confidence
-        var expensiveRpi=campAvgRpi!=null&&m.rpi!=null&&m.rpi>campAvgRpi;
-        var badMetric=isCpa?(campAvgRpa!=null&&m.rpa!=null&&m.rpa>campAvgRpa):(campAvgRoas!=null&&m.roas!=null&&m.roas<campAvgRoas);
-        if(lowVar&&expensiveRpi&&badMetric){
-          if(m.status!=='active'){
-            poorPausedCids.push(String(m.creative_id));
-            return;
-          }
-          var grp=m.competing_group||m.ad_format||'unknown';
-          if((activePerGroup[grp]||0)<=1){
-            // Sole active in this group — don't recommend detach, recommend adding more
-            if(soleActiveFormats.indexOf(grp)<0)soleActiveFormats.push(grp);
-          } else {
-            poorCids.push(String(m.creative_id));
-          }
+      (result.creativePerf || []).forEach(function(c){
+        if (c.perf_class !== 'poor') return;
+        if (c.status !== 'active') { poorPausedCids.push(String(c.creative_id)); return; }
+        if (c.is_sole_active_in_group) {
+          var g = c.mco_group || toMcoGroup(c.competing_group);
+          if (soleActiveFormats.indexOf(g) < 0) soleActiveFormats.push(g);
+        } else {
+          poorCids.push(String(c.creative_id));
         }
       });
 

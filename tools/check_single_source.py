@@ -47,6 +47,10 @@ FORBIDDEN: list[tuple[Path, str, str]] = [
      "queuing collapsed into exploring — the three creative states are mutually exclusive"),
     (DASH, r"is_queuing\s*\?\s*'Queuing'|!c\.is_queuing",
      "state read off the is_queuing flag — compare lifecycle_state === 'queuing' instead"),
+    (DASH, r"poorCidSet\[cid\]\s*=\s*true;?\s*$",
+     "performance class recomputed client-side — read c.perf_class (server stamps it)"),
+    (DASH, r"delete\s+poorCidSet\[",
+     "exclusivity cascade duplicated client-side — classifyCreativePerformance_ already applied it"),
 ]
 
 # The three creative-state queries must keep the predicates that distinguish them

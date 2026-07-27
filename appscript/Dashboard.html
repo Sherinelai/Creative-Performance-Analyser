@@ -734,6 +734,13 @@ function loadDummy(type){
     if(!c.created_date){c.lifecycle_state='optimizing';c.mco_group=invToDN(c.competing_group);return;}
     var daysOld=Math.floor((new Date()-new Date(c.created_date))/864e5);
     c.lifecycle_state=c.is_queuing?'queuing':(daysOld<=30?'exploring':'optimizing');
+    // Demo fixtures need a perf_class because the real one is stamped by the server
+    // (classifyCreativePerformance_ in Code.js). These are pre-baked EXPECTED outcomes for the
+    // demo rows, derived from their flags — not a second copy of the classification rules.
+    if(c.perf_class===undefined){
+      var _f=c.flags||[];
+      c.perf_class=_f.indexOf('below_avg')>=0?'poor':(_f.indexOf('high_rpi')>=0?'camp_avg':'top');
+    }
     c.mco_group=invToDN(c.competing_group);
   });
   // Log demo usage
@@ -2266,64 +2273,24 @@ function renderMergedTable(){
   });
   // topCidSet populated later after campAvgCidSet is built (new logic requires campaign avg)
 
-  // Pre-compute which CIDs match each performance filter
-  // All filters require Low var CI (variance==='high' = narrow CI = high confidence)
-  // ★ Top:        Low var + RPI < campAvgRpi + (ROAS > campAvg OR RPA < campAvg)
-  // ↑ Campaign:   Low var + (ROAS > campAvg OR RPA < campAvg)
-  // ↑ Format avg: Low var + (ROAS > fmtAvg  OR RPA < fmtAvg)
-  // ⚠ Poor:       Low var + RPI > campAvgRpi + (ROAS < campAvg OR RPA > campAvg)
+  // Performance classes come from the SERVER — classifyCreativePerformance_() in Code.js stamps
+  // perf_class on every creative, already mutually exclusive (Top > Campaign > Format > Poor)
+  // and using MCO-group format averages. Do NOT recompute the criteria here: this block used to,
+  // and it disagreed with the "Detach poor creatives" recommendation on screen.
+  //   ★ Top   lowVar + RPI < campaign avg + primary metric better than campaign avg
+  //   ↑ Camp  lowVar + primary metric better than campaign avg
+  //   ↑ Fmt   lowVar + primary metric better than its MCO-group average
+  //   ⚠ Poor  lowVar + RPI > campaign avg + primary metric worse than campaign avg
   var campAvgCidSet={},fmtAvgCidSet={},poorCidSet={};
-  (R.creativePerf||[]).forEach(function(c){
-    var dn=c.mco_group||invToDN(c.competing_group);
-    var fg=formatGroups[dn]||{};
-    var fmtAvgRoas=fg.roasVals&&fg.roasVals.length>0?fg.roasVals.reduce(function(s,v){return s+v;},0)/fg.roasVals.length:null;
-    var fmtAvgRpa=fg.rpaVals&&fg.rpaVals.length>0?fg.rpaVals.reduce(function(s,v){return s+v;},0)/fg.rpaVals.length:null;
-    var cid=String(c.creative_id);
-    var lowVar=(c.variance==='high'); // 'high' backend = narrow CI = low variance = high confidence
-    // Good metric check (campaign level)
-    var goodCamp=(!isPrimRpa&&c.roas!=null&&campAvgRoas!=null&&c.roas>campAvgRoas)||
-                 (isPrimRpa&&c.rpa!=null&&campAvgRpa!=null&&c.rpa<campAvgRpa);
-    // Good metric check (format level)
-    var goodFmt=(!isPrimRpa&&c.roas!=null&&fmtAvgRoas!=null&&c.roas>fmtAvgRoas)||
-                (isPrimRpa&&c.rpa!=null&&fmtAvgRpa!=null&&c.rpa<fmtAvgRpa);
-    // RPI check
-    var cheapInstall=campAvgRpi!=null&&c.rpi!=null&&c.rpi<campAvgRpi;
-    var expensiveInstall=campAvgRpi!=null&&c.rpi!=null&&c.rpi>campAvgRpi;
-    // Populate sets
-    if(lowVar&&goodCamp)campAvgCidSet[cid]=true;
-    if(lowVar&&goodFmt)fmtAvgCidSet[cid]=true;
-    // Poor: Low var + expensive install + bad main metric (explicit, not just !goodCamp)
-    var badMetric=(!isPrimRpa&&c.roas!=null&&campAvgRoas!=null&&c.roas<campAvgRoas)||
-                  (isPrimRpa&&c.rpa!=null&&campAvgRpa!=null&&c.rpa>campAvgRpa);
-    if(lowVar&&expensiveInstall&&badMetric)poorCidSet[cid]=true;
-  });
-  // ★ Top = Campaign avg + cheap install (stricter)
-  // Rebuild topCidSet using new logic
   topCidSet={};
   (R.creativePerf||[]).forEach(function(c){
     var cid=String(c.creative_id);
-    if(campAvgCidSet[cid]){
-      var lowVar=(c.variance==='high');
-      var cheapInstall=campAvgRpi!=null&&c.rpi!=null&&c.rpi<campAvgRpi;
-      if(lowVar&&cheapInstall)topCidSet[cid]=true;
+    switch(c.perf_class){
+      case 'top':      topCidSet[cid]=true;      break;
+      case 'camp_avg': campAvgCidSet[cid]=true;  break;
+      case 'fmt_avg':  fmtAvgCidSet[cid]=true;   break;
+      case 'poor':     poorCidSet[cid]=true;     break;
     }
-  });
-  // Make sets mutually exclusive: Top > CampAvg > FmtAvg > Poor
-  // Priority: positive signals beat negative. If above format avg → NOT poor.
-  // Step 1: Top wins over everything else
-  Object.keys(topCidSet).forEach(function(cid){
-    delete campAvgCidSet[cid];
-    delete fmtAvgCidSet[cid];
-    delete poorCidSet[cid];
-  });
-  // Step 2: CampAvg wins over FmtAvg and Poor
-  Object.keys(campAvgCidSet).forEach(function(cid){
-    delete fmtAvgCidSet[cid];
-    delete poorCidSet[cid];
-  });
-  // Step 3: FmtAvg wins over Poor (above format avg = not poor)
-  Object.keys(fmtAvgCidSet).forEach(function(cid){
-    delete poorCidSet[cid];
   });
 
   // Apply inline table filters
