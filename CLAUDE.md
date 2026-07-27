@@ -64,10 +64,17 @@ worth preserving in any rewrite: slugs are created **sequentially** (each needs 
 `/run/json` fires at once through `UrlFetchApp.fetchAll()`. A failed key degrades to `[]`, never
 throws. The two batches:
 
-| Batch | Keys |
-|---|---|
-| 1 (`Code.js:704`) | `perf`, `inventory`, `config` |
-| 2 (`Code.js:862`) | `dailyFmt`, `typeBreak`, `meta`, `dailyCr`, `targetEvt`, `pauseLog`, `impInst`, `queuing`, `exploring`, `optimizing` |
+**All 13 queries go in ONE batch** — `perf`, `inventory`, `config`, `dailyFmt`, `typeBreak`, `meta`,
+`dailyCr`, `targetEvt`, `pauseLog`, `impInst`, `queuing`, `exploring`, `optimizing`. It used to be two,
+and the second was a pure barrier: every query in it needs only `campaignId` + `lookbackDays`, both
+known before the first batch, so it waited for nothing. Measured on campaign 77022 — perf **40s**,
+dailyFmt **28s**, dailyCr **26s**, everything else 4–8s — the barrier alone cost ~28s of a ~68s load.
+**Do not reintroduce a second batch unless a query's SQL genuinely needs another query's rows.**
+
+Two other measured facts about load time: every query has a **~4–5s floor** regardless of size (Looker
+SQL Runner round trip + Trino planning — a 2-row query takes 4.2s), and slug creation is still
+**sequential**, so 13 round trips precede any execution. Unscoped CTEs are *not* a problem: the
+`creative_state_events` aggregation over 1.58M rows costs 6.3s versus 5.0s scoped to one campaign.
 
 `queuing`/`exploring`/`optimizing` fall back to `'SELECT 1 AS _skip'` when their builder returns null.
 Campaign-level basic/cohort queries were deliberately **removed** — recomputed from `merged[]` so the

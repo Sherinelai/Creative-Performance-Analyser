@@ -1022,16 +1022,39 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
     var campaignId = camp.campaign_id, appId = camp.app_id, appName = 'App ' + appId;
     Logger.log('Selected: ' + campaignId + ' | app ' + appId);
 
-    // ─── BATCH 1: Run Query E + Inventory + Config in parallel ───────────────
-    Logger.log('Batch 1: Perf + Inventory + Config (parallel)...');
+    // ─── ONE BATCH: every query fires together ───────────────────────────────
+    // This used to be two batches, and the second was a pure barrier: it waited for the first
+    // to finish even though every query in it needs only campaignId + lookbackDays, both known
+    // here. Wall time was therefore slowest(batch1) + slowest(batch2) instead of the slowest
+    // single query. Measured on campaign 77022: perf 40s, dailyFmt 28s, dailyCr 26s, everything
+    // else 4-8s — so the barrier alone cost ~28s of a ~68s load.
+    //
+    // Nothing below may depend on a query result to BUILD another query's SQL. If that ever
+    // becomes necessary, add a second batch rather than making this one sequential.
+    Logger.log('Running ' + 13 + ' queries in one parallel batch...');
     var t1 = new Date().getTime();
-    var b1SQLs = {
+    var allSQLs = {
+      // was batch 1
       perf:      buildCreativeLevelPerfSQL(campaignId, lookbackDays),
       inventory: buildCreativeInventorySQL(campaignId),
-      config:    buildCampaignConfigSQL(appId)
+      config:    buildCampaignConfigSQL(appId),
+      // was batch 2
+      dailyFmt:  buildDailyFormatMetricsSQL(campaignId, lookbackDays),
+      typeBreak: buildTypeBreakdownSQL(campaignId, lookbackDays),
+      meta:      buildCampaignMetaSQL(campaignId),
+      dailyCr:   buildDailyCreativeMetricsSQL(campaignId, lookbackDays),
+      targetEvt: buildTargetEventSQL(campaignId),
+      pauseLog:  buildPauseLogSQL(campaignId, lookbackDays),
+      impInst:   buildImpressionInstallSQL(campaignId, lookbackDays),
+      queuing:   buildQueueingSQL(campaignId)   || 'SELECT 1 AS _skip',
+      exploring: buildExploringSQL(campaignId)  || 'SELECT 1 AS _skip',
+      optimizing:buildOptimizingSQL(campaignId) || 'SELECT 1 AS _skip'
+      // campBasic/campCohort REMOVED — computed from merged[] for perfect consistency + speed
     };
-    var b1 = runSQLParallel(b1SQLs);
-    Logger.log('Batch 1 done in ' + Math.round((new Date().getTime()-t1)/1000) + 's');
+    var all = runSQLParallel(allSQLs);
+    Logger.log('All queries done in ' + Math.round((new Date().getTime()-t1)/1000) + 's');
+    // b1/b2 alias the same result so the parsing below is untouched (keys don't collide).
+    var b1 = all, b2 = all;
 
     var perfData  = b1.perf      || [];
     var inventory = b1.inventory || [];
@@ -1183,24 +1206,8 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
       };
     }).sort(function(a,b){ return b.revenue - a.revenue; });
 
-    // ─── BATCH 2: Daily format + Type breakdown + Campaign meta (parallel) ──
-    Logger.log('Batch 2: DailyFormat + TypeBreakdown + Meta (parallel)...');
-    var t2 = new Date().getTime();
-    var b2SQLs = {
-      dailyFmt:  buildDailyFormatMetricsSQL(campaignId, lookbackDays),
-      typeBreak: buildTypeBreakdownSQL(campaignId, lookbackDays),
-      meta:      buildCampaignMetaSQL(campaignId),
-      dailyCr:   buildDailyCreativeMetricsSQL(campaignId, lookbackDays),
-      targetEvt: buildTargetEventSQL(campaignId),
-      pauseLog:  buildPauseLogSQL(campaignId, lookbackDays),
-      impInst:   buildImpressionInstallSQL(campaignId, lookbackDays),
-      queuing:   buildQueueingSQL(campaignId)   || 'SELECT 1 AS _skip',
-      exploring: buildExploringSQL(campaignId)  || 'SELECT 1 AS _skip',
-      optimizing:buildOptimizingSQL(campaignId) || 'SELECT 1 AS _skip'
-      // campBasic/campCohort REMOVED — computed from merged[] for perfect consistency + speed
-    };
-    var b2 = runSQLParallel(b2SQLs);
-    Logger.log('Batch 2 done in ' + Math.round((new Date().getTime()-t2)/1000) + 's');
+    // (What used to be BATCH 2 was built and run above, in the single parallel batch. Its
+    // results are already in `b2` — nothing here needed to wait for batch 1.)
 
     // Parse daily format metrics
     result.dailyFormatMetrics = [];
