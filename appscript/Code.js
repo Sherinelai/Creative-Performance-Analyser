@@ -3,24 +3,30 @@
 // ============================================================
 
 // ═══════════════════════════════════════════════════════════
-// MCO INVENTORY GROUP MAPPING
-// Canonical mapping: inventory_format → MCO Inventory Group name
-// Used throughout to ensure consistent grouping
+// MCO INVENTORY GROUP MAPPING — SINGLE SOURCE OF TRUTH
+// inventory_format → MCO Inventory Group display name.
+//
+// This is the ONLY copy of this mapping. Dashboard.html receives it via
+// getConfig() (see CFG.mcoGroupMap) and the reverse lookup used for SQL-side
+// filtering is derived from it by mcoGroupToBases() — do NOT re-declare it
+// anywhere. The grouping IS the app's mental model: the Auto-Pauser competes
+// creatives inside an inventory group, so every table, chart, filter and
+// diagnosis has to group identically.
 // ═══════════════════════════════════════════════════════════
 var MCO_GROUP_MAP_GS = {
-  'tablet-portrait-vast-60s':'Tablet Portrait VAST','tablet-portrait-vast-30s':'Tablet Portrait VAST',
-  'tablet-landscape-vast-60s':'Tablet Landscape VAST','tablet-landscape-vast-30s':'Tablet Landscape VAST',
+  'tablet-portrait-vast-60s':'Tablet Portrait VAST','tablet-portrait-vast-30s':'Tablet Portrait VAST','tablet-portrait-vast':'Tablet Portrait VAST',
+  'tablet-landscape-vast-60s':'Tablet Landscape VAST','tablet-landscape-vast-30s':'Tablet Landscape VAST','tablet-landscape-vast':'Tablet Landscape VAST',
   'tablet-html-portrait-interstitial':'Tablet Portrait HTML',
   'tablet-html-landscape-interstitial':'Tablet Landscape HTML',
   'tablet-banner':'Tablet Banner',
-  'phone-portrait-vast-60s':'Phone Portrait VAST','phone-portrait-vast-30s':'Phone Portrait VAST',
-  'phone-landscape-vast-60s':'Phone Landscape VAST','phone-landscape-vast-30s':'Phone Landscape VAST',
+  'phone-portrait-vast-60s':'Phone Portrait VAST','phone-portrait-vast-30s':'Phone Portrait VAST','phone-portrait-vast':'Phone Portrait VAST',
+  'phone-landscape-vast-60s':'Phone Landscape VAST','phone-landscape-vast-30s':'Phone Landscape VAST','phone-landscape-vast':'Phone Landscape VAST',
   'phone-html-portrait-interstitial':'Phone Portrait HTML',
   'phone-html-landscape-interstitial':'Phone Landscape HTML',
   'phone-banner':'Phone Banner',
   'native-video':'Native VAST',
   'native-static':'Native Static',
-  'mrect-vast-60s':'MRECT VAST','mrect-vast-30s':'MRECT VAST',
+  'mrect-vast-60s':'MRECT VAST','mrect-vast-30s':'MRECT VAST','mrect-vast':'MRECT VAST',
   'mrect':'MRECT Static'
 };
 function toMcoGroup(inventoryFormat) {
@@ -31,13 +37,111 @@ function toMcoGroup(inventoryFormat) {
   return MCO_GROUP_MAP_GS[base] || inventoryFormat;
 }
 
+/**
+ * Reverse of toMcoGroup: an MCO Inventory Group display name → the duration-stripped
+ * inventory_format bases that roll up into it. Derived from MCO_GROUP_MAP_GS, so a new
+ * format only has to be added above. Used to translate a UI format filter into a
+ * row-level predicate.
+ */
+function mcoGroupToBases(displayName) {
+  var bases = {}, out = [];
+  Object.keys(MCO_GROUP_MAP_GS).forEach(function(fmt) {
+    if (MCO_GROUP_MAP_GS[fmt] !== displayName) return;
+    var base = fmt.replace(/-\d+s$/, '').toLowerCase();
+    if (!bases[base]) { bases[base] = true; out.push(base); }
+  });
+  return out.length ? out : [String(displayName || '').toLowerCase()];
+}
+
+// ═══════════════════════════════════════════════════════════
+// MCO RULES — SINGLE SOURCE OF TRUTH for every threshold and diagnosis code
+//
+// The prose explanation of MCO lives in ONE place: the generated MCO_SKILL
+// constant further down this file, synced from
+//   skills/mco-creative-explainer/SKILL.md   (run: python3 tools/sync_skill.py)
+// The NUMBERS live here, and flow to all three consumers:
+//   1. the Claude system prompt   — mcoRulesPromptBlock() appends them as authoritative
+//   2. the client-side fallback   — Dashboard.html reads CFG.mcoRules (getConfig())
+//   3. anything server-side       — reference MCO_RULES directly
+// Never hardcode 25000 / 7 / 5% / 10% anywhere else: change it here and all three move.
+// ═══════════════════════════════════════════════════════════
+var MCO_RULES = {
+  selection_metric: 'ITI',            // MCO selects on ITI (30-day window), never ROAS/CPI/CPA
+  iti_window_days: 30,
+
+  // Calibration = the exploring → optimizing transition (WCS)
+  calibration: { min_impressions: 25000, min_days_live: 7, impressions_window_months: 3 },
+
+  // Auto-Pauser lose criteria (MCO campaigns only) — ALL must hold
+  auto_pauser: {
+    spend_share_pct: 5,               // < this share of the competing inventory group's spend
+    spend_share_window_days: 3,
+    selection_prob_pct: 10            // ...or selection probability below this
+  },
+
+  // Winner Candidate Substitution — forced impressions for exploring creatives
+  wcs: { substitution_rate_pct_min: 5, substitution_rate_pct_max: 10, substitution_rate_pct_cap: 35 },
+
+  // Creative throttle ("waiting room") for exploring creatives
+  throttle: { min_capacity_per_format: 6 },
+
+  // Inventory groups are not clean buckets: 30s/60s VAST overlap this often
+  eligibility: { format_overlap_pct: 46.5 },
+
+  lifecycle_states: {
+    exploring:  'below calibration on EITHER impressions or days live — protected from the Auto-Pauser, receives WCS impressions',
+    optimizing: 'at or above calibration on BOTH — normal MCO competition, eligible for the Auto-Pauser'
+  },
+
+  // The closed vocabulary the AI must return and the UI must render
+  diagnosis_codes: {
+    auto_paused_low_iti:          'Paused: ITI lower than competitors',
+    auto_paused_low_spend_share:  'Paused: spend share below the Auto-Pauser threshold',
+    auto_paused_selection_prob:   'Paused: selection probability below the threshold',
+    exploring_wcs_protected:      'In WCS exploration, exempt from pause',
+    exploring_throttle_queued:    'In the throttle queue, waiting for capacity',
+    winning_highest_iti:          'Spending: highest ITI in group',
+    winning_by_eligibility:       'Spending: favorable eligibility matching',
+    losing_iti_competition:       'Not spending: outcompeted on ITI',
+    losing_eligibility_mismatch:  'Not eligible for high-volume bid requests',
+    spend_shift_format_change:    'Spend moved to a different inventory format',
+    newly_optimizing:             'Just exited exploration, competing normally',
+    free_floating_random:         'Non-MCO: selected randomly',
+    insufficient_data:            'Not enough data to diagnose'
+  }
+};
+
+/** Render MCO_RULES as a markdown block appended to the AI system prompt. */
+function mcoRulesPromptBlock() {
+  var R = MCO_RULES, L = [];
+  L.push('## Authoritative thresholds (these override any number in the prose above)');
+  L.push('- Selection metric: ' + R.selection_metric + ' over ' + R.iti_window_days + ' days.');
+  L.push('- Calibration / optimizing: >= ' + R.calibration.min_impressions + ' impressions (past ' +
+         R.calibration.impressions_window_months + ' months) AND >= ' + R.calibration.min_days_live + ' days live.');
+  L.push('- Exploring: below calibration on EITHER count. ' + R.lifecycle_states.exploring);
+  L.push('- Auto-Pauser lose criteria (ALL): optimized; AND < ' + R.auto_pauser.spend_share_pct +
+         '% of its competing inventory group spend over the past ' + R.auto_pauser.spend_share_window_days +
+         ' days; AND (spent in that window OR selection probability < ' + R.auto_pauser.selection_prob_pct + '%).');
+  L.push('- WCS substitution: ' + R.wcs.substitution_rate_pct_min + '-' + R.wcs.substitution_rate_pct_max +
+         '% of won bids (max ' + R.wcs.substitution_rate_pct_cap + '%).');
+  L.push('- Creative throttle: minimum ' + R.throttle.min_capacity_per_format + ' exploring creatives per inventory format.');
+  L.push('- Inventory-format overlap: ~' + R.eligibility.format_overlap_pct + '% between duration variants.');
+  L.push('');
+  L.push('## Allowed `diagnosis` values (return EXACTLY one of these strings)');
+  Object.keys(R.diagnosis_codes).forEach(function(k) { L.push('- `' + k + '` — ' + R.diagnosis_codes[k]); });
+  return L.join('\n');
+}
+
 
 // ═══════════════════════════════════════════════════════════
 // CONFIG (merged from Config.gs)
 // ═══════════════════════════════════════════════════════════
+// Both halves of the Looker API3 key live in Script Properties — nothing credential-shaped
+// in source. Set LOOKER_CLIENT_ID and LOOKER_CLIENT_SECRET under
+// Project Settings → Script Properties before deploying.
 var LOOKER_CONFIG = {
   BASE_URL: 'https://liftoff.cloud.looker.com',
-  CLIENT_ID: 'Mb3bkMgpt2XdFHCnbSsz',
+  CLIENT_ID: PropertiesService.getScriptProperties().getProperty('LOOKER_CLIENT_ID') || '',
   CLIENT_SECRET: PropertiesService.getScriptProperties().getProperty('LOOKER_CLIENT_SECRET') || '',
 };
 var CACHE_TOKEN_SECONDS = 1500; // 25 minutes
@@ -135,6 +239,9 @@ function getAccessToken() {
   var cache = CacheService.getScriptCache();
   var token = cache.get('looker_token');
   if (token) return token;
+  if (!LOOKER_CONFIG.CLIENT_ID || !LOOKER_CONFIG.CLIENT_SECRET) {
+    throw new Error('Looker credentials missing: set LOOKER_CLIENT_ID and LOOKER_CLIENT_SECRET in Script Properties');
+  }
   var url = LOOKER_CONFIG.BASE_URL + '/api/4.0/login?client_id=' + encodeURIComponent(LOOKER_CONFIG.CLIENT_ID) + '&client_secret=' + encodeURIComponent(LOOKER_CONFIG.CLIENT_SECRET);
   var r = UrlFetchApp.fetch(url, { method: 'post', muteHttpExceptions: true });
   if (r.getResponseCode() !== 200) throw new Error('Looker auth failed');
@@ -737,8 +844,11 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters) {
       if (sf.competingGroup) {
         var cgArr = Array.isArray(sf.competingGroup) ? sf.competingGroup : (sf.competingGroup ? [sf.competingGroup] : []);
         if (cgArr.length > 0) {
-          var DN_TO_BASE = {'Tablet Portrait VAST':'tablet-portrait-vast','Tablet Landscape VAST':'tablet-landscape-vast','Tablet Portrait HTML':'tablet-html-portrait-interstitial','Tablet Landscape HTML':'tablet-html-landscape-interstitial','Tablet Banner':'tablet-banner','Phone Portrait VAST':'phone-portrait-vast','Phone Landscape VAST':'phone-landscape-vast','Phone Portrait HTML':'phone-html-portrait-interstitial','Phone Landscape HTML':'phone-html-landscape-interstitial','Phone Banner':'phone-banner','Native VAST':'native-video','Native Static':'native-static','MRECT VAST':'mrect-vast','MRECT Static':'mrect'};
-          var allowedBases = cgArr.map(function(dn){ return DN_TO_BASE[dn] || dn.toLowerCase(); });
+          // Reverse lookup derived from MCO_GROUP_MAP_GS — no second copy of the mapping.
+          var allowedBases = [];
+          cgArr.forEach(function(dn){
+            mcoGroupToBases(dn).forEach(function(b){ if (allowedBases.indexOf(b) < 0) allowedBases.push(b); });
+          });
           merged = merged.filter(function(r){
             if(!r.competing_group) return false;
             var base = r.competing_group.replace(/-\d+s$/, '').toLowerCase();
@@ -2073,7 +2183,20 @@ function getAvailableApps(q) {
   try { if(!q||q.length<2)return {apps:{},campaigns:{}}; var r=fetchCampaignSearch(q); var a={},c={}; r.forEach(function(x){if(x.app_id)a[x.app_id]='App '+x.app_id; if(x.campaign_id)c[x.campaign_id]={name:x.campaign_name,app_id:x.app_id,state:x.campaign_state};}); return {apps:a,campaigns:c}; }
   catch(e){return {apps:{},campaigns:{}};}
 }
-function getConfig() { return { thresholds: THRESHOLDS, keyFormats: KEY_FORMATS, defaultLookback: DEFAULT_LOOKBACK_DAYS }; }
+/**
+ * Everything the front end needs that is defined server-side. Dashboard.html calls this
+ * once on load (CFG) so the inventory-group mapping and the MCO thresholds exist in
+ * exactly one place — see MCO_GROUP_MAP_GS / MCO_RULES at the top of this file.
+ */
+function getConfig() {
+  return {
+    thresholds: THRESHOLDS,
+    keyFormats: KEY_FORMATS,
+    defaultLookback: DEFAULT_LOOKBACK_DAYS,
+    mcoGroupMap: MCO_GROUP_MAP_GS,
+    mcoRules: MCO_RULES
+  };
+}
 
 // ═══════════════════════════════════════════════════════════
 // TEST
@@ -2103,61 +2226,27 @@ function testConnection() {
 // CLAUDE API — AI INSIGHTS
 // ═══════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════
-// SKILL LOADER — reads SKILL.md + mco-knowledge-base.md from
-// Google Drive at runtime so updates to those files take effect
-// without changing code.
+// SKILL LOADER — ONE source of MCO knowledge, no runtime fetch
 //
-// SETUP (one-time):
-//   1. Upload SKILL.md to Google Drive → copy its File ID
-//   2. Upload mco-knowledge-base.md to Google Drive → copy its File ID
-//   3. In Apps Script: Project Settings → Script Properties → Add:
-//        SKILL_FILE_ID   = <file id of SKILL.md>
-//        KB_FILE_ID      = <file id of mco-knowledge-base.md>
-//   4. Share both files: right-click → Share → Anyone with the link (Viewer)
+// The prose below (MCO_SKILL) is GENERATED from the repo file
+//   skills/mco-creative-explainer/SKILL.md
+// by `python3 tools/sync_skill.py`, which also checks that the numbers in
+// MCO_RULES appear in the prose. Edit the .md, run the script, `clasp push -f`.
 //
-// If either property is missing or the read fails, the app falls back
-// to the hardcoded MCO_SYSTEM_PROMPT below.
+// The previous design read SKILL.md + mco-knowledge-base.md from Google Drive at
+// runtime (Script Properties SKILL_FILE_ID / KB_FILE_ID) with this constant as a
+// fallback. That gave two copies that could disagree, with the invisible one
+// winning in production. Drive loading is REMOVED — those two Script Properties
+// are now unused and can be deleted. To change the skill: edit the repo .md.
 // ═══════════════════════════════════════════════════════════
-var _skillCache = null;
 
+/** The AI system prompt: generated MCO prose + the authoritative numbers from MCO_RULES. */
 function getSkillContent() {
-  if (_skillCache) return _skillCache;
-  try {
-    var props = PropertiesService.getScriptProperties();
-    var skillId = props.getProperty('SKILL_FILE_ID');
-    var kbId    = props.getProperty('KB_FILE_ID');
-    if (!skillId && !kbId) {
-      Logger.log('Skill: no file IDs set — using hardcoded fallback');
-      return MCO_SYSTEM_PROMPT_FALLBACK;
-    }
-    var parts = [];
-    if (skillId) {
-      try {
-        parts.push(DriveApp.getFileById(skillId).getBlob().getDataAsString());
-        Logger.log('Skill: loaded SKILL.md from Drive (' + skillId + ')');
-      } catch(e) { Logger.log('Skill: failed to load SKILL.md — ' + e.message); }
-    }
-    if (kbId) {
-      try {
-        parts.push(DriveApp.getFileById(kbId).getBlob().getDataAsString());
-        Logger.log('Skill: loaded mco-knowledge-base.md from Drive (' + kbId + ')');
-      } catch(e) { Logger.log('Skill: failed to load KB — ' + e.message); }
-    }
-    if (parts.length === 0) {
-      Logger.log('Skill: Drive reads failed — using hardcoded fallback');
-      return MCO_SYSTEM_PROMPT_FALLBACK;
-    }
-    _skillCache = parts.join('\n\n---\n\n');
-    Logger.log('Skill: loaded ' + _skillCache.length + ' chars from Drive');
-    return _skillCache;
-  } catch(e) {
-    Logger.log('Skill: unexpected error — ' + e.message);
-    return MCO_SYSTEM_PROMPT_FALLBACK;
-  }
+  return MCO_SKILL + '\n\n---\n\n' + mcoRulesPromptBlock();
 }
 
-// Hardcoded fallback (used when Drive files are not set up yet)
-var MCO_SYSTEM_PROMPT_FALLBACK = [
+// ── BEGIN GENERATED FROM skills/mco-creative-explainer/SKILL.md — DO NOT EDIT BY HAND ──
+var MCO_SKILL = [
   '# MCO Creative Explainer — Complete Reference',
   '',
   'This document is the merged skill + knowledge base for diagnosing MCO creative behavior.',
@@ -2392,66 +2481,111 @@ var MCO_SYSTEM_PROMPT_FALLBACK = [
   '| **Calibration** | ~25K impressions over 7 days |',
   ''
 ].join('\n');
+// ── END GENERATED ──
 
-// Keep old name as alias so nothing else breaks
-var MCO_SYSTEM_PROMPT = MCO_SYSTEM_PROMPT_FALLBACK;
+// ── Claude API config (one place) ───────────────────────────
+// claude-sonnet-5: adaptive thinking is ON when `thinking` is omitted (Sonnet 4.x ran
+// thinking-off), and max_tokens caps thinking + response TOGETHER — the old
+// max_tokens:1024 would now truncate the JSON. Hence the larger budget below, plus
+// `output_config.format` (structured outputs), which guarantees schema-valid JSON so
+// there is nothing to un-fence and JSON.parse cannot fail on a stray preamble.
+var CLAUDE_MODEL      = 'claude-sonnet-5';
+var CLAUDE_API_URL    = 'https://api.anthropic.com/v1/messages';
+var CLAUDE_MAX_TOKENS = 4096;
+
+/**
+ * One Claude call, one place. Both AI features go through here:
+ * prompt caching on the system block (the MCO skill is ~3K tokens and identical on
+ * every call — cache reads are ~10% of input price), structured outputs for guaranteed
+ * JSON, and errors that say what actually happened instead of "unavailable".
+ *
+ * @param {string} systemPrompt  the skill + task instructions
+ * @param {Object} userData      payload, JSON-stringified into the user turn
+ * @param {Object} schema        JSON Schema the response must satisfy
+ * @param {string} effort        'low' | 'medium' | 'high' — thinking depth / token spend
+ * @param {string} label         for log lines
+ */
+function callClaudeJson_(systemPrompt, userData, schema, effort, label) {
+  var API_KEY = PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY');
+  if (!API_KEY) throw new Error('CLAUDE_API_KEY not set');
+
+  var payload = {
+    model: CLAUDE_MODEL,
+    max_tokens: CLAUDE_MAX_TOKENS,
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+    output_config: { effort: effort || 'medium', format: { type: 'json_schema', schema: schema } },
+    messages: [{ role: 'user', content: JSON.stringify(userData) }]
+  };
+
+  var r = UrlFetchApp.fetch(CLAUDE_API_URL, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+
+  var body = r.getContentText();
+  if (r.getResponseCode() !== 200) {
+    Logger.log(label + ': HTTP ' + r.getResponseCode() + ' ' + body.substring(0, 400));
+    throw new Error(label + ' failed (HTTP ' + r.getResponseCode() + ')');
+  }
+
+  var data;
+  try { data = JSON.parse(body); }
+  catch (e) { throw new Error(label + ': response was not JSON — ' + body.substring(0, 200)); }
+
+  if (data.stop_reason === 'refusal') throw new Error(label + ': the model declined this request');
+  if (data.stop_reason === 'max_tokens') throw new Error(label + ': response truncated — raise CLAUDE_MAX_TOKENS');
+
+  var text = (data.content || []).filter(function(b) { return b.type === 'text'; })
+                                 .map(function(b) { return b.text; }).join('');
+  if (!text) throw new Error(label + ': empty response (stop_reason ' + data.stop_reason + ')');
+
+  var u = data.usage || {};
+  Logger.log(label + ': ok — in ' + (u.input_tokens || 0) + ' / cache_read ' +
+             (u.cache_read_input_tokens || 0) + ' / out ' + (u.output_tokens || 0));
+  return JSON.parse(text);
+}
 
 /**
  * Diagnose why a creative was paused or is in its current state.
  * Called from Dashboard.html for each statusLog entry.
  */
 function diagnoseMcoCreative(creativeData) {
-  var API_KEY = PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY');
-  if (!API_KEY) throw new Error('CLAUDE_API_KEY not set');
-
   var systemPrompt = getSkillContent() + '\n\n' + [
-    '## Output Format',
-    'Return ONLY a valid JSON object (no markdown, no preamble):',
-    '{',
-    '  "diagnosis": "auto_paused_low_iti | auto_paused_low_spend_share | auto_paused_selection_prob | exploring_wcs_protected | exploring_throttle_queued | winning_highest_iti | winning_by_eligibility | losing_iti_competition | losing_eligibility_mismatch | spend_shift_format_change | newly_optimizing | free_floating_random | insufficient_data",',
-    '  "format": "the creative\'s MCO Inventory Group name (e.g. Phone Portrait VAST)",',
-    '  "explanation": "2-3 sentences max. Lead with the WHY. Reference specific numbers from the data.",',
-    '  "supporting_evidence": ["short data-backed reasons"],',
-    '  "suggested_actions": ["1-2 concrete actions"],',
-    '  "confidence": "high | medium | low"',
-    '}',
+    '## Your Task',
+    'Diagnose the single creative in the user JSON: why is it in this state?',
+    'Apply the thresholds and diagnosis vocabulary above — they are authoritative.',
     '',
-    'Diagnosis Rules:',
-    '1. Free Floating → free_floating_random',
-    '2. <25K impressions AND <7 days live → exploring (wcs_protected or throttle_queued)',
-    '3. Paused: compare ITI vs group, check spend share vs 5%, check selection probability vs 10%',
-    '4. Spending + highest ITI → winning_highest_iti; otherwise check eligibility',
-    '5. Not spending + lower ITI → losing_iti_competition',
-    '6. Missing data → insufficient_data with confidence: low',
+    'Decision order:',
+    '1. Free Floating (non-MCO) → free_floating_random',
+    '2. Below calibration on impressions OR days live → exploring (wcs_protected, or throttle_queued when it has no spend)',
+    '3. Paused: rank its ITI in the competition group, check spend share against the Auto-Pauser threshold, check selection probability',
+    '4. Spending with the highest ITI in its group → winning_highest_iti; otherwise consider eligibility',
+    '5. Not spending with a lower ITI → losing_iti_competition',
+    '6. Missing the data you would need → insufficient_data with confidence "low"',
     '',
-    'Metric reminders: RPI = cost of install (lower=better). ROAS = returns (higher=better). RPA = cost per target event (lower=better).',
-    'Be concise. Lead with the reason. Cite specific numbers.',
+    '`format` must be the MCO Inventory Group name (e.g. "Phone Portrait VAST"), not the raw inventory_format.',
+    'Metric reminders: RPI = cost of install (lower is better). ROAS = returns (higher is better). RPA = cost per target event (lower is better).',
+    'Lead with the reason. Cite specific numbers from the data. Two to three sentences of explanation, no more.',
   ].join('\n');
 
-  var payload = {
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: JSON.stringify(creativeData) }]
+  var schema = {
+    type: 'object',
+    properties: {
+      diagnosis:           { type: 'string', enum: Object.keys(MCO_RULES.diagnosis_codes) },
+      format:              { type: 'string' },
+      explanation:         { type: 'string' },
+      supporting_evidence: { type: 'array', items: { type: 'string' } },
+      suggested_actions:   { type: 'array', items: { type: 'string' } },
+      confidence:          { type: 'string', enum: ['high', 'medium', 'low'] }
+    },
+    required: ['diagnosis', 'format', 'explanation', 'supporting_evidence', 'suggested_actions', 'confidence'],
+    additionalProperties: false
   };
 
-  try {
-    var r = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'post',
-      contentType: 'application/json',
-      headers: { 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    });
-    var data = JSON.parse(r.getContentText());
-    var text = (data.content||[]).filter(function(b) { return b.type === 'text'; }).map(function(b) { return b.text; }).join('');
-    var clean = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    if (!clean) throw new Error('Empty API response');
-    return JSON.parse(clean);
-  } catch (e) {
-    Logger.log('diagnoseMcoCreative error: ' + e.message);
-    throw new Error('MCO diagnosis unavailable');
-  }
+  return callClaudeJson_(systemPrompt, creativeData, schema, 'low', 'diagnoseMcoCreative');
 }
 
 /**
@@ -2459,77 +2593,62 @@ function diagnoseMcoCreative(creativeData) {
  * Called from Dashboard.html after charts render.
  */
 function summarizeFormatTrends(trendData) {
-  var API_KEY = PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY');
-  if (!API_KEY) throw new Error('CLAUDE_API_KEY not set');
-
   var systemPrompt = getSkillContent() + '\n\n' + [
     '## Your Task',
     'You are analyzing format-level performance trends for a Liftoff campaign.',
     'The user provides JSON with: formatMetrics (spend/ROAS/RPI per format), dailyFormatMetrics (time series), and campaign context.',
-    '',
-    '## Output Format',
-    'Return ONLY a valid JSON object (no markdown, no preamble):',
-    '{',
-    '  "summary": "2-3 sentence overview of what stands out across all formats",',
-    '  "format_insights": [',
-    '    {',
-    '      "format": "MCO Inventory Group name exactly as in the input data",',
-    '      "trend": "improving | declining | stable | volatile",',
-    '      "insight": "1 sentence on what\'s notable about this format"',
-    '    }',
-    '  ],',
-    '  "recommendation": "1-2 sentences on what the Performance Strategist should focus on"',
-    '}',
     '',
     'Rules:',
     '- Format names in the data are MCO Inventory Group names. ALWAYS use the exact name from the input.',
     '- RPI = cost of install (lower is better). ROAS = returns on spend (higher is better). RPA = cost per target event (lower is better).',
     '- Reference specific numbers (spend %, ROAS values, RPI).',
     '- Flag formats with declining ROAS or disproportionate spend vs performance.',
+    '- Remember format-level spend is decided by ML pricing, not by MCO — do not attribute a spend shift to MCO.',
     '- Keep it actionable for a Performance Strategist.',
   ].join('\n');
 
-  var payload = {
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: JSON.stringify(trendData) }]
+  var schema = {
+    type: 'object',
+    properties: {
+      summary: { type: 'string' },
+      format_insights: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            format:  { type: 'string' },
+            trend:   { type: 'string', enum: ['improving', 'declining', 'stable', 'volatile'] },
+            insight: { type: 'string' }
+          },
+          required: ['format', 'trend', 'insight'],
+          additionalProperties: false
+        }
+      },
+      recommendation: { type: 'string' }
+    },
+    required: ['summary', 'format_insights', 'recommendation'],
+    additionalProperties: false
   };
 
-  try {
-    var r = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'post',
-      contentType: 'application/json',
-      headers: { 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    });
-    var data = JSON.parse(r.getContentText());
-    var text = (data.content||[]).filter(function(b) { return b.type === 'text'; }).map(function(b) { return b.text; }).join('');
-    var clean = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    if (!clean) throw new Error('Empty API response');
-    return JSON.parse(clean);
-  } catch (e) {
-    Logger.log('summarizeFormatTrends error: ' + e.message);
-    throw new Error('AI summary unavailable');
-  }
+  return callClaudeJson_(systemPrompt, trendData, schema, 'medium', 'summarizeFormatTrends');
 }
 
 
 // ─── Skill utilities ────────────────────────────────────────
-/** Clear cached skill content (call this after updating Drive files) */
-function clearSkillCache() {
-  _skillCache = null;
-  Logger.log('Skill cache cleared');
-}
-
-/** Test that Drive files load correctly — run this from the Apps Script editor */
+/**
+ * Show what the AI actually receives as its system prompt — run from the editor.
+ * The skill is compiled into this file (no Drive fetch, nothing to invalidate), so this
+ * is a pure check that the generated block and the MCO_RULES block are both present.
+ */
 function testSkillLoad() {
-  _skillCache = null; // force fresh load
   var content = getSkillContent();
-  Logger.log('Skill content length: ' + content.length + ' chars');
+  Logger.log('System prompt: ' + content.length + ' chars');
   Logger.log('First 200 chars: ' + content.substring(0, 200));
-  return content.length > 100 ? 'OK — ' + content.length + ' chars loaded' : 'WARN — very short, check file IDs';
+  var hasRules = content.indexOf('Authoritative thresholds') >= 0;
+  Logger.log('MCO_RULES block present: ' + hasRules);
+  return (content.length > 100 && hasRules)
+    ? 'OK — ' + content.length + ' chars, rules block present'
+    : 'WARN — check MCO_SKILL / mcoRulesPromptBlock()';
 }
 
 

@@ -375,23 +375,33 @@ var _activeMetrics=['revenue'];
 var COLORS=['#555FFF','#1CAA53','#0376D9','#FF760D','#0045A8','#FFCB05','#ED0303','#F7BACF','#4A5871','#00893E'];
 var C_VIDEO='#555FFF',C_NON_VIDEO='#95A2BC',C_INTERACTIVE='#1CAA53',C_NOT_INTERACTIVE='#FF760D';
 // MCO Inventory Group names — canonical order for display/charts
-var ALL_DN=['Phone Portrait VAST','Phone Landscape VAST','Phone Portrait HTML','Phone Landscape HTML','Phone Banner','Tablet Portrait VAST','Tablet Landscape VAST','Tablet Portrait HTML','Tablet Landscape HTML','Tablet Banner','Native VAST','Native Static','MRECT VAST','MRECT Static'];
+// The list of MCO Inventory Groups — filled from the server (KEY_FORMATS in Code.js).
+var ALL_DN=[];
 // Explicit mapping: every inventory_format → MCO Inventory Group name (from CSV)
-var MCO_GROUP_MAP={
-  'tablet-portrait-vast-60s':'Tablet Portrait VAST','tablet-portrait-vast-30s':'Tablet Portrait VAST','tablet-portrait-vast':'Tablet Portrait VAST',
-  'tablet-landscape-vast-60s':'Tablet Landscape VAST','tablet-landscape-vast-30s':'Tablet Landscape VAST','tablet-landscape-vast':'Tablet Landscape VAST',
-  'tablet-html-portrait-interstitial':'Tablet Portrait HTML',
-  'tablet-html-landscape-interstitial':'Tablet Landscape HTML',
-  'tablet-banner':'Tablet Banner',
-  'phone-portrait-vast-60s':'Phone Portrait VAST','phone-portrait-vast-30s':'Phone Portrait VAST','phone-portrait-vast':'Phone Portrait VAST',
-  'phone-landscape-vast-60s':'Phone Landscape VAST','phone-landscape-vast-30s':'Phone Landscape VAST','phone-landscape-vast':'Phone Landscape VAST',
-  'phone-html-portrait-interstitial':'Phone Portrait HTML',
-  'phone-html-landscape-interstitial':'Phone Landscape HTML',
-  'phone-banner':'Phone Banner',
-  'native-video':'Native VAST','native-static':'Native Static',
-  'mrect-vast-60s':'MRECT VAST','mrect-vast-30s':'MRECT VAST','mrect-vast':'MRECT VAST',
-  'mrect':'MRECT Static'
-};
+/* ═══════════════════════════════════════════════════════════
+   SERVER CONFIG — the MCO inventory-group mapping and the MCO thresholds are
+   NOT defined here. They live in Code.js (MCO_GROUP_MAP_GS / MCO_RULES) and are
+   fetched once by initApp() via getConfig(), so there is exactly one copy of each.
+   Read them through MCO_GROUP_MAP / mcoRules() below — never re-declare a literal.
+   ═══════════════════════════════════════════════════════════ */
+var CFG=null;              // full getConfig() payload
+var MCO_GROUP_MAP={};      // inventory_format → MCO Inventory Group (from the server)
+
+/** MCO_RULES from the server, or null before it arrives / outside Apps Script. */
+function mcoRules(){ return CFG&&CFG.mcoRules?CFG.mcoRules:null; }
+
+/**
+ * Lifecycle state per the Auto-Pauser's own definition: "Optimized" requires BOTH
+ * >= min_impressions AND >= min_days_live, so failing EITHER leaves the creative
+ * exploring (and therefore WCS-protected).
+ */
+function mcoLifecycleState(impressions,daysLive){
+  var MR=mcoRules();
+  if(!MR)return null;
+  var c=MR.calibration;
+  return ((impressions||0)>=c.min_impressions&&(daysLive||0)>=c.min_days_live)?'optimizing':'exploring';
+}
+
 // invToDN: inventory_format → MCO Inventory Group display name
 function invToDN(inv){
   if(!inv)return 'Unknown';
@@ -1280,7 +1290,19 @@ function requestAiInsights(){
 
 /* ─── Client-side MCO diagnosis (no API needed) ─── */
 function localMcoDiagnosis(p){
+  // Every threshold below comes from MCO_RULES in Code.js (via getConfig) — the same
+  // numbers the AI prompt is given. Nothing rule-bearing is hardcoded in this file.
+  var MR=mcoRules();
   var dn=invToDN(p.inventory_format);
+  if(!MR){
+    return {diagnosis:'insufficient_data',format:dn,
+      explanation:'The MCO rule set has not loaded from the server yet, so an offline diagnosis cannot be produced. Reload the page and try again.',
+      supporting_evidence:['getConfig() has not returned MCO_RULES'],
+      suggested_actions:['Reload the dashboard','If this persists, check the Apps Script execution log for getConfig errors'],
+      confidence:'low'};
+  }
+  var CAL=MR.calibration, AP=MR.auto_pauser, IMPS=CAL.min_impressions, DMIN=CAL.min_days_live;
+  var IMPS_K=Math.round(IMPS/1000)+'K';
   var grp=p.competition_group||[];
   grp.sort(function(a,b){return (b.iti||0)-(a.iti||0);});
   var winner=grp.length>0?grp[0]:null;
@@ -1308,46 +1330,49 @@ function localMcoDiagnosis(p){
       confidence:'medium'};
   }
 
-  // ─── Step 2: Check lifecycle state — WCS exploration (SKILL.md §2, KB §6-7) ───
-  // Exploring: <25K impressions AND <7 days live → protected from Auto-Pauser
-  // We estimate from created_date if available
+  // ─── Step 2: Check lifecycle state — WCS exploration (SKILL.md §4-5) ───
+  // Exploring (protected from the Auto-Pauser) = below calibration on impressions OR days live.
+  // We estimate from created_date if available.
   var daysLive=null;
   var cp=(R.creativePerf||[]).find(function(c){return String(c.creative_id)===String(p.creative_id);});
   if(cp&&cp.created_date){
     var created=new Date(cp.created_date),now=new Date();
     daysLive=Math.floor((now-created)/864e5);
   }
-  // If creative was very recently created AND has very low spend → could be exploring/newly_optimizing
-  if(daysLive!=null&&daysLive<=10&&(p.spend||0)<50){
+  // If creative was very recently created AND has very low spend → could be exploring/newly_optimizing.
+  // The day window is a display heuristic (calibration + a few days of margin), not a rule.
+  if(daysLive!=null&&daysLive<=DMIN+3&&(p.spend||0)<50){
     if((p.spend||0)===0){
       return {diagnosis:'exploring_throttle_queued',format:dn,
         explanation:'CID '+p.creative_id+' in '+dn+' appears to be in the creative throttle queue. With '+daysLive+' days live and $0 spend, it is waiting for exploration capacity to open up.',
-        supporting_evidence:['Creative is '+daysLive+' days old with zero spend','Creative throttle limits: min 6 exploring creatives per inventory format','Capacity scales with campaign spend level'],
+        supporting_evidence:['Creative is '+daysLive+' days old with zero spend','Creative throttle limits: min '+MR.throttle.min_capacity_per_format+' exploring creatives per inventory format','Capacity scales with campaign spend level'],
         suggested_actions:['Wait for capacity — the creative will start receiving WCS impressions when a slot opens','Check if too many creatives were uploaded simultaneously to the same inventory format'],
         confidence:'medium'};
     }
     return {diagnosis:'exploring_wcs_protected',format:dn,
-      explanation:'CID '+p.creative_id+' in '+dn+' is still in WCS exploration phase ('+daysLive+' days live). It is protected from Auto-Pauser and receiving forced impressions via bid hijacking (5-10% substitution rate).',
-      supporting_evidence:['Creative is '+daysLive+' days old — below the 7-day optimizing threshold','WCS guarantees at least 25K impressions over 7 days before normal competition begins','Currently exempt from Auto-Pauser'],
-      suggested_actions:['Monitor ITI development — the creative will transition to "optimizing" once it hits ≥25K impressions AND ≥7 days','After transition, it competes normally on ITI against calibrated incumbents'],
+      explanation:'CID '+p.creative_id+' in '+dn+' is still in WCS exploration phase ('+daysLive+' days live). It is protected from Auto-Pauser and receiving forced impressions via bid hijacking ('+MR.wcs.substitution_rate_pct_min+'-'+MR.wcs.substitution_rate_pct_max+'% substitution rate).',
+      supporting_evidence:['Creative is '+daysLive+' days old — below the '+DMIN+'-day optimizing threshold','WCS guarantees at least '+IMPS_K+' impressions over '+DMIN+' days before normal competition begins','Currently exempt from Auto-Pauser'],
+      suggested_actions:['Monitor ITI development — the creative will transition to "optimizing" once it hits ≥'+IMPS_K+' impressions AND ≥'+DMIN+' days','After transition, it competes normally on ITI against calibrated incumbents'],
       confidence:'medium'};
   }
 
   // ─── Step 3: "why_paused" diagnosis (SKILL.md §3, KB §5, §8-A) ───
   if(p.question_type==='why_paused'||p.status==='auto_paused'){
     // Check if newly optimizing (just exited exploration, lost immediately)
-    if(daysLive!=null&&daysLive>=7&&daysLive<=14&&myRank>1){
+    if(daysLive!=null&&daysLive>=DMIN&&daysLive<=DMIN*2&&myRank>1){
       return {diagnosis:'newly_optimizing',format:dn,
         explanation:'CID '+p.creative_id+' in '+dn+' just exited WCS exploration ('+daysLive+' days live) and immediately lost ITI competition to calibrated incumbents. Its ITI ('+myIti+') couldn\'t match the group leader at '+winIti+' — it was paused before gaining enough traction.',
-        supporting_evidence:['Creative transitioned from exploring → optimizing ~'+(daysLive-7)+' days ago','ITI '+myIti+' ranks #'+myRank+' of '+grp.length+' — '+itiRatio+'x below leader','This is common: before WCS, ~75% of creatives were paused before calibration'],
-        suggested_actions:['Clone and relaunch for a fresh WCS exploration period with 25K guaranteed impressions','Review the creative concept — can ITI be improved with different visuals or messaging?','Note: cloning is not a guarantee — MCO may still not select it if post-calibration ITI is low'],
+        supporting_evidence:['Creative transitioned from exploring → optimizing ~'+(daysLive-DMIN)+' days ago','ITI '+myIti+' ranks #'+myRank+' of '+grp.length+' — '+itiRatio+'x below leader','This is common: before WCS, ~75% of creatives were paused before calibration'],
+        suggested_actions:['Clone and relaunch for a fresh WCS exploration period with '+IMPS_K+' guaranteed impressions','Review the creative concept — can ITI be improved with different visuals or messaging?','Note: cloning is not a guarantee — MCO may still not select it if post-calibration ITI is low'],
         confidence:'high',caveats:itiDisconnect||'After WCS exploration, creatives must compete on pure ITI. Incumbents with months of data have an advantage.'};
     }
 
-    // Auto-Pauser: paused by MAB system (KB §5)
-    // All 3 conditions must be met: (1) optimized, (2) <5% spend share, (3) recent spend or <10% selection prob
+    // Auto-Pauser: paused by MAB system (SKILL.md §3).
+    // All 3 conditions must hold: (1) optimized, (2) spend share below the threshold,
+    // (3) recent spend OR selection probability below the threshold.
     var isMabPause=(p.paused_by||'').toLowerCase().indexOf('mab')>=0||(p.paused_by||'').toLowerCase().indexOf('auto')>=0;
-    var spendBelow5=(p.spend_share_pct!=null&&p.spend_share_pct<5);
+    var spendBelow5=(p.spend_share_pct!=null&&p.spend_share_pct<AP.spend_share_pct);
+    var SS=AP.spend_share_pct+'%';
     var itiIsLowest=myRank>=grp.length&&grp.length>1;
     var itiIsLow=myRank>1;
 
@@ -1360,29 +1385,29 @@ function localMcoDiagnosis(p){
       var ev=['ITI ('+myIti+') ranks #'+myRank+' of '+grp.length+' in '+dn];
       // spend_share_pct is the LOOKBACK PERIOD share, not the 3-day share Auto-Pauser uses
       if(spendBelow5){
-        ev.push('Lookback spend share '+sowStr+' is below 5% — consistent with Auto-Pauser trigger');
+        ev.push('Lookback spend share '+sowStr+' is below '+SS+' — consistent with Auto-Pauser trigger');
       } else {
-        ev.push('Lookback spend share is '+sowStr+' (Auto-Pauser uses last 3 days, which was <5% at time of pause)');
+        ev.push('Lookback spend share is '+sowStr+' (Auto-Pauser uses the last '+AP.spend_share_window_days+' days, which was <'+SS+' at time of pause)');
       }
       if(winner&&!winnerIsMe)ev.push('Group leader CID '+winner.creative_id+' has ITI '+winIti+' ('+itiRatio+'x higher)');
-      ev.push('Auto-Pauser requires ALL: optimized (≥25K imps, ≥7d live), <5% spend share of its MCO inventory format in last 3 days, and either recent spend or <10% selection probability');
+      ev.push('Auto-Pauser requires ALL: optimized (≥'+IMPS_K+' imps, ≥'+DMIN+'d live), <'+SS+' spend share of its MCO inventory format in the last '+AP.spend_share_window_days+' days, and either recent spend or <'+AP.selection_prob_pct+'% selection probability');
       if(isMabPause)ev.push('Paused by: MAB Auto Pauser (system-initiated)');
 
-      // Build explanation — don't claim current share is below 5% if it isn't
+      // Build explanation — don't claim the current share is below the threshold if it isn't
       var shareExplain=spendBelow5
-        ? 'With '+sowStr+' spend share of its MCO inventory format (below the 5% threshold)'
-        : 'Its 3-day rolling spend share had dropped below 5% of its MCO inventory format at the time of pause';
+        ? 'With '+sowStr+' spend share of its MCO inventory format (below the '+SS+' threshold)'
+        : 'Its '+AP.spend_share_window_days+'-day rolling spend share had dropped below '+SS+' of its MCO inventory format at the time of pause';
 
       return {diagnosis:primaryDiag,format:dn,
         explanation:'CID '+p.creative_id+' was auto-paused because its ITI ('+myIti+') is '+(itiIsLowest?'the lowest':'#'+myRank)+' in the '+dn+' competition group — the leader '+(!winnerIsMe?'(CID '+winner.creative_id+') ':'')+' has '+winIti+'. '+shareExplain+', so the Auto-Pauser consolidated spend on higher-performing creatives.',
         supporting_evidence:ev,
         suggested_actions:[
-          'Clone and relaunch to get a fresh WCS exploration period (25K impressions guaranteed over 7 days)',
+          'Clone and relaunch to get a fresh WCS exploration period ('+IMPS_K+' impressions guaranteed over '+DMIN+' days)',
           'Review whether spend shifted to another inventory format that may be outperforming '+dn,
           'Pausing or cloning does not guarantee spend redistributes as expected — ML reprices the ad group when a different creative is selected'
         ],
         confidence:grp.length>1?'high':'medium',
-        caveats:itiDisconnect||'MCO selects purely on ITI over a 30-day window. Inventory format competition groups can overlap ~46% on some exchanges, meaning the actual competition may be broader than what the UI shows.'};
+        caveats:itiDisconnect||'MCO selects purely on ITI over a '+MR.iti_window_days+'-day window. Inventory format competition groups can overlap ~'+MR.eligibility.format_overlap_pct+'% on some exchanges, meaning the actual competition may be broader than what the UI shows.'};
     }
 
     // Manual pause (by a person, not system)
@@ -1524,7 +1549,8 @@ function localFormatSummary(){
   } else if(lowestCpiFmt&&highestCpiFmt&&lowestCpiFmt!==highestCpiFmt&&highestCpi>lowestCpi*1.5){
     rec=mcoNote+highestCpiFmt+' has install cost (RPI) $'+highestCpi.toFixed(2)+' vs '+lowestCpiFmt+' at $'+lowestCpi.toFixed(2)+' — '+((highestCpi/lowestCpi).toFixed(1))+'x more expensive per install. Lower RPI doesn\'t always mean better user quality — check downstream 7D ROAS/RPA to confirm.';
   } else if(bestFmt){
-    rec=mcoNote+bestFmt+' is the top performer — consider scaling creative volume in this format.'+(R.mcoEnabled?' Note: inventory format overlap (~46% on some exchanges) means new '+bestFmt+' creatives will also compete in adjacent formats.':'');
+    var _ovl=mcoRules()?mcoRules().eligibility.format_overlap_pct:null;  // MCO_RULES (Code.js)
+    rec=mcoNote+bestFmt+' is the top performer — consider scaling creative volume in this format.'+((R.mcoEnabled&&_ovl!=null)?' Note: inventory format overlap (~'+_ovl+'% on some exchanges) means new '+bestFmt+' creatives will also compete in adjacent formats.':'');
   } else {
     rec=mcoNote;
   }
@@ -2456,7 +2482,7 @@ function renderMergedTable(){
         if(!c.lifecycle_state && c.status==='active'){
           var impr=c.impressions||0;
           var dLive=c.created_date?Math.floor((new Date()-new Date(c.created_date))/864e5):99;
-          c.lifecycle_state=(impr<25000&&dLive<7)?'exploring':'optimizing';
+          c.lifecycle_state=mcoLifecycleState(impr,dLive);  // thresholds from CFG.mcoRules (Code.js)
         }
         if(c.lifecycle_state){var lcs=c.lifecycle_state.toLowerCase();if(lcs==='exploring')lcExploring++;else if(lcs==='optimizing')lcOptimizing++;}
       }
@@ -2549,7 +2575,7 @@ function renderMergedTable(){
       if(!c.lifecycle_state && !c.is_queuing && c.status==='active'){
         var impr=c.impressions||0;
         var dLive=c.created_date?Math.floor((new Date()-new Date(c.created_date))/864e5):99;
-        c.lifecycle_state=(impr<25000&&dLive<7)?'exploring':'optimizing';
+        c.lifecycle_state=mcoLifecycleState(impr,dLive);  // thresholds from CFG.mcoRules (Code.js)
       }
       if(c.is_queuing){
         lcPipeline='<span class="tag tag-a">Queuing</span>';
@@ -3041,6 +3067,18 @@ function initApp(){
   if(_isAppsScript){
     google.script.run.withSuccessHandler(function(email){_userEmail=email||'';}).getActiveUserEmail();
     google.script.run.withSuccessHandler(function(url){_webAppUrl=url||'';}).getWebAppUrl();
+    // Server-side config: the MCO inventory-group mapping and the MCO thresholds live
+    // in Code.js only (MCO_GROUP_MAP_GS / MCO_RULES) and arrive here — see mcoRules().
+    google.script.run
+      .withSuccessHandler(function(cfg){
+        if(!cfg)return;
+        CFG=cfg;
+        MCO_GROUP_MAP=cfg.mcoGroupMap||{};
+        ALL_DN=cfg.keyFormats||[];
+        initMS();  // the format multi-select is built from ALL_DN
+      })
+      .withFailureHandler(function(e){ console.warn('getConfig failed: '+e); })
+      .getConfig();
   }
   // Check URL params for auto-analyze (shared links)
   setTimeout(checkUrlParams,300);
