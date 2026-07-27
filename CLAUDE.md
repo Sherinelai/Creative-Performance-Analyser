@@ -22,6 +22,8 @@
 - `.mcp.json` — registers `creative-mcp` against the project venv
 - `skills/mco-creative-explainer/SKILL.md` — **the** MCO domain reference; compiled into `Code.js`
 - `tools/sync_skill.py` — compiles that `.md` into `Code.js`'s `MCO_SKILL` (`--check` to verify)
+- `tools/check_single_source.py` — fails if duplicated knowledge reappears
+- `tools/render_smoke_test.js` — runs `Dashboard.html`'s render chain in Node behind a DOM stub
 - `auth/` — `looker.ini` + Google tokens/service account (all **gitignored**, never commit)
 - `LEARNINGS.d/` — per-session learnings log (each session appends to its OWN `<session-id>.md`)
 - `logs/mcp_queries.jsonl` — local query log (gitignored)
@@ -218,6 +220,12 @@ Non-AI analysis is `analyzeCreativePerformance` (`Code.js:2540`) + `_generateRec
 9. **`getConfig()` is fetched async at page load.** Anything rule-bearing that could run before it
    returns must handle `mcoRules() === null` (as `localMcoDiagnosis` does). If more of the UI starts
    depending on `CFG`, consider gating the first render on it instead.
+10. **`node --check` is not a test.** v132 shipped a `TypeError` (`R._metricLabel is not a function`,
+    from a blind string replace that matched mid-identifier) which parsed fine and killed the page
+    after the campaign summary — a thrown error mid-render leaves the rest of the DOM unwritten.
+    `node tools/render_smoke_test.js` exercises the render chain on demo data with `CFG` empty
+    (worst case) and catches this class. Run it before every push. Never patch a minified line with
+    a blind `str.replace` — print the result and re-run the smoke test.
 
 ---
 

@@ -24,7 +24,11 @@ CODE.JS
     looker.*cstudio__creative_format* PDT name is dated — use getPDT(), never a literal.
   • Respect DATA_BAKE_DAYS = 7 (attribution not settled) or the metric reads low.
 
-SINGLE SOURCE (run this — it is the guard, not a suggestion)
+RUN BOTH CHECKS BEFORE PUSHING (they are guards, not suggestions)
+  • node tools/render_smoke_test.js          ← executes the whole render chain on demo data.
+    `node --check` only proves the file PARSES. A TypeError mid-render (a bad identifier, a
+    call on undefined) leaves the page rendered up to the throw point and blank after it —
+    exactly how v132 shipped with only the campaign summary visible. This catches that.
   • python3 tools/check_single_source.py     ← must pass; also runs sync_skill.py --check
   • edited skills/mco-creative-explainer/SKILL.md? run `python3 tools/sync_skill.py` first,
     or the prompt the model receives is the OLD prose.

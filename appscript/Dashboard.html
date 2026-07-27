@@ -885,8 +885,19 @@ function renderDashboard(){
   var activeCount=allPerf.filter(function(c){return c.status==='active';}).length;
   var pausedCount=allPerf.filter(function(c){return c.status==='paused';}).length;
   var totalCount=allPerf.length;
-  var otherCount=totalCount-activeCount-pausedCount; // deleted/pending/unknown states
-  var pausedSub='of '+totalCount+(otherCount>0?' · '+otherCount+' other state'+(otherCount>1?'s':''):'');
+  // Active + Paused does NOT have to equal Total. pinpoint.public.creatives.state has three
+  // values — enabled / paused / deleted — and normState() only folds the first two into
+  // 'active' / 'paused'. A deleted creative still has spend in the window, so it belongs in
+  // the total. Name the remainder by its actual state instead of a vague "other".
+  var otherByState={};
+  allPerf.forEach(function(c){
+    if(c.status==='active'||c.status==='paused')return;
+    var s=c.status||'unknown';
+    otherByState[s]=(otherByState[s]||0)+1;
+  });
+  var otherParts=Object.keys(otherByState).sort(function(a,b){return otherByState[b]-otherByState[a];})
+    .map(function(s){return otherByState[s]+' '+s;});
+  var pausedSub='of '+totalCount+(otherParts.length?' · '+otherParts.join(' · '):'');
   document.getElementById('kpiRow').innerHTML=
     kpi('Total spend',kpiSpend>0?'$'+kpiSpend.toLocaleString():'&mdash;',getDateRange(R.lookbackDays||30).label,'')+
     kpi(kpiMetricLabel,kpiMetricVal,kpiMetricSub,'')+
@@ -1759,7 +1770,7 @@ function renderSpendInner(){
     h+='</div>';
   }
   // Summary table
-  h+='<div class="tbl-wrap" style="margin-top:8px"><button class="copy-btn" data-act="copyTable" data-tbl="spendTbl">&#9112; Copy</button><table class="spend-tbl" id="spendTbl"><tr><th>Format</th><th>Spend</th><th>%</th><th>RPI</th><th>'+(R&&R._metricLabel(primaryMetricKey(R&&R.campType)))+'</th></tr>';
+  h+='<div class="tbl-wrap" style="margin-top:8px"><button class="copy-btn" data-act="copyTable" data-tbl="spendTbl">&#9112; Copy</button><table class="spend-tbl" id="spendTbl"><tr><th>Format</th><th>Spend</th><th>%</th><th>RPI</th><th>'+metricLabel(primaryMetricKey(R&&R.campType))+'</th></tr>';
   var perfByGroup={};
   (R.creativePerf||[]).forEach(function(c){
     var lbl=c.mco_group||invToDN(c.competing_group);
