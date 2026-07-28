@@ -50,9 +50,18 @@ const makeEl = () => {
   });
 };
 
+// One element per id, so what the render WRITES is observable. A fresh stub per call made every
+// assertion about content impossible — and "did not throw" is not the same as "drew something":
+// campaign 73853 came back with an empty overview panel and no exception at all.
+const elements = new Map();
+const byId = (id) => {
+  if (!elements.has(id)) elements.set(id, makeEl());
+  return elements.get(id);
+};
+
 const document = {
   readyState: 'complete',
-  getElementById: () => makeEl(),
+  getElementById: byId,
   querySelector: () => makeEl(),
   querySelectorAll: () => [],
   createElement: () => makeEl(),
@@ -88,6 +97,22 @@ try {
 
 let failed = false;
 
+// "Rendered" means content landed, not merely that nothing threw. These are the two elements the
+// user actually looks at first: the KPI tiles and the overview panel that holds every module.
+const REQUIRED = [
+  ['kpiRow', 200],
+  ['panel-overview', 2000],
+];
+function assertRendered(label) {
+  const thin = REQUIRED
+    .map(([id, min]) => [id, min, (elements.get(id) || { innerHTML: '' }).innerHTML.length])
+    .filter(([, min, len]) => len < min);
+  if (thin.length) {
+    throw new Error('rendered but empty (' + label + '): ' +
+      thin.map(([id, min, len]) => `#${id} ${len} chars < ${min}`).join(', '));
+  }
+}
+
 // --real: drive the render chain with a REAL fetchCreativeData response (written by
 // tools/run_pipeline.js). Demo fixtures can't reproduce production data shapes — null mco_group,
 // metric-less rows, unassigned statusLog entries — so this is the mode that catches a client
@@ -98,7 +123,8 @@ if (process.argv.includes('--real')) {
   try {
     vm.runInContext('R = globalThis.R || R; onData(R);', ctx);
     if (errors.length) throw new Error(errors.join('\n'));
-    console.log('PASS  render chain on REAL data');
+    assertRendered('REAL data' + (real.partial ? ', overview pass' : ''));
+    console.log('PASS  render chain on REAL data' + (real.partial ? ' (overview pass)' : ''));
   } catch (e) {
     console.error('FAIL  render chain on REAL data:\n' + (e.stack || e) + '\n');
     process.exit(1);
@@ -111,6 +137,7 @@ for (const type of ['cpr', 'cpa']) {
   try {
     vm.runInContext(`loadDummy(${JSON.stringify(type)})`, ctx);
     if (errors.length) throw new Error(errors.join('\n'));
+    assertRendered(type);
     console.log(`PASS  render chain for ${type}`);
   } catch (e) {
     failed = true;
@@ -142,6 +169,7 @@ try {
     _perfError = null;
   `, ctx);
   if (errors.length) throw new Error(errors.join('\n'));
+  assertRendered('overview pass');
   console.log('PASS  render chain on the overview pass (perf still pending)');
 } catch (e) {
   failed = true;

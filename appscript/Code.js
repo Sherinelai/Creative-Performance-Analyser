@@ -1217,6 +1217,18 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters, o
     var config = { campaign_type: campaignType, mco_enabled: mcoEnabled, kpi_target: null, app_id: appId, app_name: appName };
     var result = analyzeCreativePerformance(merged, statusLog, config, lookbackDays);
 
+    // analyzeCreativePerformance answers an empty creative set with {error} and nothing else, and
+    // everything below assumes a full result — the first thing to touch a missing field was
+    // Logger.log(result.recommendations.length), which threw "Cannot read properties of undefined
+    // (reading 'length')" and reached the user as exactly that. Say what actually happened instead.
+    if (result.error) {
+      Logger.log('Analysis found nothing to analyse: ' + result.error);
+      return { error: 'No creatives to analyse for campaign ' + campaignId + ' in the last ' +
+        lookbackDays + ' days. The campaign has no creative with activity in this window and none ' +
+        'assigned to it that the inventory query can see. Try a longer lookback window, or check ' +
+        'whether the creatives were detached.' };
+    }
+
     // Always override statusLog with the fresh query result (Analysis.gs may have its own version)
     result.statusLog = statusLog;
 

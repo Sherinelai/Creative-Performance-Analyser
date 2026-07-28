@@ -591,7 +591,8 @@ function analyze(){
   // left with a useful page instead of an error.
   google.script.run
     .withSuccessHandler(function(d){ onOverview(d,v,st,lb,f,token); })
-    .withFailureHandler(onError)
+    // A thrown phase-1 failure goes down the same road: try phase 2 before giving up on the load.
+    .withFailureHandler(function(err){ onOverview({error:(err&&err.message)||String(err)},v,st,lb,f,token); })
     .fetchCampaignOverview(v,st,lb,f);
 }
 
@@ -604,19 +605,25 @@ var _loadToken=0, _perfError=null;
  */
 function onOverview(d,v,st,lb,f,token){
   if(token!==_loadToken)return;      // a newer search has already been started
-  onData(d);
-  if(!d||d.error)return;
+  // Phase 1 failing says NOTHING about phase 2, so it must not end the load. Campaign 32613 is
+  // absent from hive.bi.cstudio_analytics_daily_v1 — the inventory query legitimately returns 0 rows
+  // for it — so with perf skipped the overview has no creative source at all, while the numbers pass
+  // finds all 197 creatives that were active in the window. Keep the spinner and let phase 2 answer.
+  var painted=!!(d&&!d.error);
+  if(painted)onData(d);
+  else if(d&&d.error)console.log('overview pass had nothing to show: '+d.error);
+  var afterPerf=function(full){
+    if(token!==_loadToken)return;
+    if(full&&!full.error){onData(full);return;}
+    var msg=(full&&full.error)||'Unknown error';
+    // Phase 2 is the authoritative pass. If phase 1 painted, its failure only replaces the pending
+    // card; if there is no page yet, its error IS the page.
+    if(painted){_perfError=msg;refreshPerfPending();}
+    else onData({error:msg});
+  };
   google.script.run
-    .withSuccessHandler(function(full){
-      if(token!==_loadToken)return;
-      // A phase-2 error replaces the pending card only — the overview stays on screen.
-      if(!full||full.error){_perfError=(full&&full.error)||'Unknown error';refreshPerfPending();return;}
-      onData(full);
-    })
-    .withFailureHandler(function(err){
-      if(token!==_loadToken)return;
-      _perfError=(err&&err.message)||String(err);refreshPerfPending();
-    })
+    .withSuccessHandler(afterPerf)
+    .withFailureHandler(function(err){ afterPerf({error:(err&&err.message)||String(err)}); })
     .fetchCreativeData(v,st,lb,f);
 }
 
@@ -1006,9 +1013,13 @@ function renderDashboard(){
   var otherParts=Object.keys(otherByState).sort(function(a,b){return otherByState[b]-otherByState[a];})
     .map(function(s){return otherByState[s]+' '+s;});
   var pausedSub='of '+totalCount+(otherParts.length?' · '+otherParts.join(' · '):'');
+  // On the overview pass these two tiles have no answer yet — the perf query is what knows. Say
+  // "querying" rather than an em dash: an em dash reads as "this campaign has no spend", which is a
+  // different and wrong claim, and it made the summary look like it had lost its data.
+  var pendingVal='<span style="color:var(--tx3);font-size:0.62em;font-weight:500">querying&hellip;</span>';
   document.getElementById('kpiRow').innerHTML=
-    kpi('Total spend',kpiSpend>0?'$'+kpiSpend.toLocaleString():'&mdash;',getDateRange(R.lookbackDays||30).label,'')+
-    kpi(kpiMetricLabel,kpiMetricVal,kpiMetricSub,'')+
+    kpi('Total spend',R.partial?pendingVal:(kpiSpend>0?'$'+kpiSpend.toLocaleString():'&mdash;'),getDateRange(R.lookbackDays||30).label,'')+
+    kpi(kpiMetricLabel,R.partial?pendingVal:kpiMetricVal,R.partial?'still loading':kpiMetricSub,'')+
     kpi('Active creatives',activeCount,'of '+totalCount,'var(--gn)')+
     kpi('Paused creatives',pausedCount,pausedSub,'var(--rd)')+
     kpi('Format groups',fmtGrps,'with creatives','');
