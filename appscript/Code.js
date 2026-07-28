@@ -570,7 +570,7 @@ function runSQLParallel(sqlMap, failedOut) {
         fail(key, 'HTTP ' + responses[i].getResponseCode());
         results[key] = [];
       } else {
-        var parsed = JSON.parse(body);
+        var parsed = parseLookerJson_(body, key);
         // Looker answers a failed SQL Runner query with HTTP 200 and an error payload, not rows:
         // either {looker_error|message|errors} or [{looker_error: '...'}]. Parsing that as data is
         // how a query timeout became "0 rows" instead of "this query failed".
@@ -590,6 +590,30 @@ function runSQLParallel(sqlMap, failedOut) {
     }
   });
   return results;
+}
+
+/**
+ * Parse a SQL Runner response body, tolerating the non-JSON number literals Looker emits.
+ *
+ * A Trino DOUBLE division by zero yields IEEE Infinity, and Looker writes it out bare —
+ * `"roas_ci_margin":Infinity` — which `JSON.parse` rejects, so ONE such cell used to cost the whole
+ * query. Campaign 73853 hit it as soon as the window was chunked: over 30 days a creative with
+ * customer revenue always had revenue too, but inside a 10-day slice it need not.
+ *
+ * The divisions that produced it are now NULLIF-guarded, so this is a net rather than the fix. It
+ * only rewrites a literal in VALUE position (`:Infinity`, never `:"Infinity"`), and null is what
+ * every consumer here already expects from a missing metric.
+ */
+function parseLookerJson_(body, key) {
+  try {
+    return JSON.parse(body);
+  } catch (e) {
+    var repaired = body.replace(/:\s*-?Infinity\b/g, ':null').replace(/:\s*NaN\b/g, ':null');
+    if (repaired === body) throw e;
+    var out = JSON.parse(repaired);   // still throws if the body was broken for another reason
+    Logger.log('Query ' + key + ' contained Infinity/NaN, which is not valid JSON — read as null');
+    return out;
+  }
 }
 
 /** The error text in a Looker SQL Runner response, or '' when the response really is rows. */
@@ -2179,11 +2203,11 @@ function buildCreativeLevelPerfSQL(campaignId, lookbackDays, win) {
     "  COALESCE(SUM(revenue_summary.target_events_first_d7), 0) AS target_events_d7,",
     "  COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.target_events_first_d7), 0), 0) AS rpa_d7,",
     "  CASE WHEN COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) < 0.0005 THEN NULL",
-    "       ELSE 1.96 * SQRT(COALESCE(SUM(revenue_summary.incremental_squared_capped_customer_revenue_d7), 0)) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) END AS roas_ci_margin,",
+    "       ELSE 1.96 * SQRT(COALESCE(SUM(revenue_summary.incremental_squared_capped_customer_revenue_d7), 0)) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0), 0) END AS roas_ci_margin,",
     "  CASE WHEN COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) < 0.0005 THEN NULL",
-    "       ELSE COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) - 1.96 * SQRT(COALESCE(SUM(revenue_summary.incremental_squared_capped_customer_revenue_d7), 0)) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) END AS roas_d7_lower_ci,",
+    "       ELSE COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0), 0) - 1.96 * SQRT(COALESCE(SUM(revenue_summary.incremental_squared_capped_customer_revenue_d7), 0)) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0), 0) END AS roas_d7_lower_ci,",
     "  CASE WHEN COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) < 0.0005 THEN NULL",
-    "       ELSE COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) + 1.96 * SQRT(COALESCE(SUM(revenue_summary.incremental_squared_capped_customer_revenue_d7), 0)) / COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) END AS roas_d7_upper_ci,",
+    "       ELSE COALESCE(SUM(revenue_summary.customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0), 0) + 1.96 * SQRT(COALESCE(SUM(revenue_summary.incremental_squared_capped_customer_revenue_d7), 0)) / NULLIF(COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0), 0) END AS roas_d7_upper_ci,",
     "  CASE WHEN COALESCE(SUM(revenue_summary.target_events_first_d7), 0) < 5 THEN NULL",
     "       ELSE COALESCE(SUM(revenue_summary.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / (COALESCE(SUM(revenue_summary.target_events_first_d7), 0) + 1.96 * SQRT(COALESCE(SUM(revenue_summary.target_events_first_d7), 0))) END AS rpa_d7_lower_ci,",
     "  CASE WHEN COALESCE(SUM(revenue_summary.target_events_first_d7), 0) < 5 THEN NULL",

@@ -19,7 +19,12 @@ const campaignId = process.argv[2] || '41535';
 const lookbackDays = parseInt(process.argv[3] || '30', 10);
 const ROWS = JSON.parse(fs.readFileSync('/tmp/rows_all.json', 'utf8'));
 
-const CREATIVE_FORMAT_PDT = 'looker.lr_rbd0d1785124923808_cstudio__creative_format';
+// These are DATED PDTs: Looker regenerates them under a new name, and the old one stops existing
+// (`Table 'hive.looker.lr_...' does not exist`). The app never hardcodes them — getPDT() /
+// getQueuePDT() resolve and column-verify at runtime. These constants are only here so the SQL can
+// be BUILT offline; when a query suddenly says the table is gone, refresh them with
+//   SHOW TABLES FROM looker LIKE '%cstudio__creative_format%'
+const CREATIVE_FORMAT_PDT = 'looker.lr_rbd0d1785211467189_cstudio__creative_format';
 const QUEUE_PDT = 'looker.lr_rbec01785126641966_queue_creative_statistics';
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'appscript', 'Code.js'), 'utf8');
