@@ -396,6 +396,19 @@ function mcoRules(){ return CFG&&CFG.mcoRules?CFG.mcoRules:null; }
 function TH(name){ return (CFG&&CFG.thresholds&&CFG.thresholds[name]!=null)?CFG.thresholds[name]:null; }
 
 /** One METRICS entry (Code.js): {label, direction, definition}. */
+/**
+ * The money a creative contributed. GROSS REVENUE (revenue_micros_d7) — what the advertiser pays —
+ * is the dashboard's only money axis: every dollar figure, every share, every weighting. `spend` is
+ * media cost and is no longer displayed; in MCO vocabulary "spend share" means this.
+ */
+function moneyOf(c){
+  if(!c)return 0;
+  // Creative rows carry `revenue`; campaignPerf carries `revenue_d7`. Accepting both keeps every
+  // caller from having to know which shape it holds — getting that wrong silently yields $0.
+  var v=(c.revenue!=null)?c.revenue:c.revenue_d7;
+  return (v==null||isNaN(v))?0:v;
+}
+
 function metricDef(key){ return (CFG&&CFG.metrics&&CFG.metrics[key])?CFG.metrics[key]:null; }
 
 /** 'RPA' / '7D ROAS' — the display label for a metric key. */
@@ -800,7 +813,7 @@ function loadDummy(type){
   var perfs = d.creativePerf || [];
   d.totalCreatives = perfs.length;
   d.activeCreatives = perfs.filter(function(c){return c.status==='active';}).length;
-  d.totalSpend = Math.round(perfs.reduce(function(s,c){return s+(c.spend||0);},0));
+  d.totalSpend = Math.round(perfs.reduce(function(s,c){return s+moneyOf(c);},0));
   d.primaryMetric = d.optimizationState&&d.optimizationState.indexOf('rpa')>=0 ? 'rpa' : 'roas';
   // avgMetric: avg RPA for CPA, avg ROAS for CPR
   var isCpa = d.optimizationState&&(d.optimizationState.indexOf('cpa')>=0||d.optimizationState.indexOf('rpa')>=0);
@@ -814,7 +827,7 @@ function loadDummy(type){
   d.availableCampaigns = [{campaign_id: type==='cpr'?70028:70855, campaign_name:'Demo '+(type==='cpr'?'CPR':'CPA')+' Campaign', app_id:d.appId}];
   // Compute sow_pct
   var ts = d.totalSpend || 1;
-  perfs.forEach(function(c){c.sow_pct = c.spend ? c.spend/ts*100 : 0;});
+  perfs.forEach(function(c){var m=moneyOf(c);c.sow_pct = m ? m/ts*100 : 0;});
   // Add flags if missing
   perfs.forEach(function(c){if(!c.flags)c.flags=[];});
   // ciDashboardSetup fallback (Analysis.gs normally provides this)
@@ -898,10 +911,10 @@ function onData(d){
   _hiddenTableCols = R._isCpa
     ? {'d7_roas':true, '1d_roas':true, 'iti':true, 'ci':true, 'enabled_date':true, 'paused_date_col':true, 'impressions':true, 'installs_col':true, 'vi_tags':true}
     : {'rpa':true, '1d_roas':true, 'iti':true, 'ci':true, 'enabled_date':true, 'paused_date_col':true, 'impressions':true, 'installs_col':true, 'vi_tags':true};
-  // Pre-hide all series except top 3 by spend
+  // Pre-hide all series except top 3 by gross revenue
   _hiddenSeries={};
   var grps={};
-  (R.creativePerf||[]).forEach(function(c){var lbl=invToDN(c.competing_group);grps[lbl]=(grps[lbl]||0)+(c.spend||0);});
+  (R.creativePerf||[]).forEach(function(c){var lbl=invToDN(c.competing_group);grps[lbl]=(grps[lbl]||0)+moneyOf(c);});
   var sorted=Object.keys(grps).sort(function(a,b){return grps[b]-grps[a];});
   sorted.forEach(function(lbl,i){if(i>=3)_hiddenSeries[lbl]=true;});
   // pills bar updated in renderDashboard
@@ -996,13 +1009,11 @@ function renderDashboard(){
   // and the format spend share are computed from.
   var kpiRevenue=(_cpk&&_cpk.revenue_d7!=null)?Math.round(_cpk.revenue_d7)
                  :(R.totalRevenue!=null?Math.round(R.totalRevenue):null);
-  var kpiSpend=(_cpk&&_cpk.spend!=null)?Math.round(_cpk.spend):R.totalSpend;
-  var kpiRevenueSub=getDateRange(R.lookbackDays||30).label+
-    (kpiSpend>0?' · $'+kpiSpend.toLocaleString()+' spend':'');
+  var kpiRevenueSub=getDateRange(R.lookbackDays||30).label;
   var kpiMetricLabel='Avg '+ml, kpiMetricVal=avgMetricDisplay, kpiMetricSub=R.kpiTarget?'KPI: '+R.kpiTarget:'';
   if(_cpk){
-    if(R._isCpa&&_cpk.rpa!=null){kpiMetricLabel='Campaign RPA';kpiMetricVal='$'+_cpk.rpa.toFixed(2);kpiMetricSub=(R.kpiTarget?'KPI: '+R.kpiTarget+' · ':'')+'spend-weighted';}
-    else if(!R._isCpa&&_cpk.roas_d7!=null){kpiMetricLabel='Campaign D7 ROAS';kpiMetricVal=(_cpk.roas_d7*100).toFixed(2)+'%';kpiMetricSub=(R.kpiTarget?'KPI: '+R.kpiTarget+' · ':'')+'spend-weighted';}
+    if(R._isCpa&&_cpk.rpa!=null){kpiMetricLabel='Campaign RPA';kpiMetricVal='$'+_cpk.rpa.toFixed(2);kpiMetricSub=(R.kpiTarget?'KPI: '+R.kpiTarget+' · ':'')+'gross-revenue-weighted';}
+    else if(!R._isCpa&&_cpk.roas_d7!=null){kpiMetricLabel='Campaign D7 ROAS';kpiMetricVal=(_cpk.roas_d7*100).toFixed(2)+'%';kpiMetricSub=(R.kpiTarget?'KPI: '+R.kpiTarget+' · ':'')+'gross-revenue-weighted';}
   }
   var fmtGrps=(function(){var g={};(R.creativePerf||[]).forEach(function(c){if(c.competing_group)g[c.mco_group||invToDN(c.competing_group)]=1;});return Object.keys(g).length;})();
   // Compute all counts from creativePerf for consistency
@@ -1028,7 +1039,7 @@ function renderDashboard(){
   // different and wrong claim, and it made the summary look like it had lost its data.
   var pendingVal='<span style="color:var(--tx3);font-size:0.62em;font-weight:500">querying&hellip;</span>';
   document.getElementById('kpiRow').innerHTML=
-    kpi('Gross revenue',R.partial?pendingVal:(kpiRevenue>0?'$'+kpiRevenue.toLocaleString():'&mdash;'),R.partial?getDateRange(R.lookbackDays||30).label:kpiRevenueSub,'')+
+    kpi('Gross revenue',R.partial?pendingVal:(kpiRevenue>0?'$'+kpiRevenue.toLocaleString():'&mdash;'),kpiRevenueSub,'')+
     kpi(kpiMetricLabel,R.partial?pendingVal:kpiMetricVal,R.partial?'still loading':kpiMetricSub,'')+
     kpi('Active creatives',activeCount,'of '+totalCount,'var(--gn)')+
     kpi('Paused creatives',pausedCount,pausedSub,'var(--rd)')+
@@ -1043,8 +1054,8 @@ function switchTab(id){document.querySelectorAll('.tab-panel').forEach(function(
 var _selectedStatusCid=null;
 var _statusFmtFilter=null; // null = show all, string = filter to this format
 var _diagCache={}; // {cid: diagResult}
-var _statusChartMetric={}; // {cid: 'spend'|'ipm'|'rpi'}
-var _statusHidden={}; // {cid: {spend:false,rpi:false,ipm:false}}
+var _statusChartMetric={}; // {cid: 'revenue'|'ipm'|'rpi'}
+var _statusHidden={}; // {cid: {revenue:false,rpi:false,ipm:false}}
 function renderOverview(){
   // Recent creative changes — left/right layout
   // Two kinds of change: 'paused' (state change) and 'unassigned' (detached from this campaign).
@@ -1053,12 +1064,12 @@ function renderOverview(){
   var pausedEntries=(R.statusLog||[]).filter(function(e){
     return e.change_type==='paused'||e.change_type==='unassigned';
   });
-  // Enrich with spend data and sort by spend % descending
-  var totalCampSpend=R.totalSpend||((R.creativePerf||[]).reduce(function(s,c){return s+(c.spend||0);},0))||1;
+  // Enrich with gross revenue and sort by revenue share descending
+  var totalCampSpend=(R.creativePerf||[]).reduce(function(s,c){return s+moneyOf(c);},0)||1;
   pausedEntries.forEach(function(e){
     var cp=(R.creativePerf||[]).find(function(c){return String(c.creative_id)===String(e.creative_id);});
     e._cp=cp;
-    e._spend=cp?cp.spend||0:0;
+    e._spend=cp?moneyOf(cp):0;
     e._sowPct=e._spend/totalCampSpend*100;
     // A detached creative may not be in creativePerf at all; fall back to the format the
     // unassigned query reported for it.
@@ -1094,7 +1105,7 @@ function renderOverview(){
       h+='<div data-act="toggleStatusFmt" data-val="'+encodeURIComponent(fmt)+'" style="font-size:var(--f5);color:var(--tx2);padding:4px 10px;background:'+(isSel?fc+'22':' var(--sf)')+';border-radius:6px;border:1.5px solid '+(isSel?fc:'var(--bd)')+';display:flex;align-items:center;gap:5px;cursor:pointer;transition:all 0.15s">';
       h+='<div style="width:8px;height:8px;border-radius:50%;background:'+fc+';flex-shrink:0"></div>';
       h+='<span style="font-weight:600;color:'+(isSel?fc:'var(--slate)')+'">'+fp.count+'</span> '+fmt;
-      h+=' <span style="font-size:var(--f6);color:var(--rd);font-weight:600">'+fp.sowPct.toFixed(1)+'%</span> <span style="font-size:var(--f7);color:var(--tx3)">of campaign spend</span>';
+      h+=' <span style="font-size:var(--f6);color:var(--rd);font-weight:600">'+fp.sowPct.toFixed(1)+'%</span> <span style="font-size:var(--f7);color:var(--tx3)">of campaign gross revenue</span>';
       h+='</div>';
     });
     h+='</div>';
@@ -1206,7 +1217,7 @@ function renderStatusDetail(){
     var fmtDN=invToDN(fmtKey);
     var dailyCr=R.dailyCreativeMetrics||[];
     var points=[];
-    dailyCr.forEach(function(r){if(String(r.creative_id)===String(cid))points.push({dt:r.dt,spend:r.spend||0,rpi:r.rpi||0,ipm:r.ipm||0,roas_d7:r.roas_d7||0});});
+    dailyCr.forEach(function(r){if(String(r.creative_id)===String(cid))points.push({dt:r.dt,revenue:r.revenue||0,rpi:r.rpi||0,ipm:r.ipm||0,roas_d7:r.roas_d7||0});});
     points.sort(function(a,b){return a.dt.localeCompare(b.dt);});
     if(points.length>0){
       if(!_statusHidden[cid])_statusHidden[cid]={};
@@ -1214,7 +1225,7 @@ function renderStatusDetail(){
       var sfc=fmtColor(fmtDN);
       h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><div style="font-size:var(--f6);font-weight:600;color:var(--slate);display:flex;align-items:center;gap:5px"><div style="width:8px;height:8px;border-radius:50%;background:'+sfc+'"></div>'+fmtDN+'</div>';
       h+='<div class="cdetail-toggles" style="margin:0">';
-      [{k:'spend',l:'Spend',c:'#555FFF'},{k:'rpi',l:'RPI',c:'#ED0303'},{k:'ipm',l:'IPM',c:'#1CAA53'}].forEach(function(m){
+      [{k:'revenue',l:'Gross revenue',c:'#555FFF'},{k:'rpi',l:'RPI',c:'#ED0303'},{k:'ipm',l:'IPM',c:'#1CAA53'}].forEach(function(m){
         var hidden=!!(_statusHidden[cid]||{})[m.k];
         h+='<button data-act="toggleStatusMetric" data-val="'+m.k+'" data-cid="'+cid+'" style="'+(hidden?'opacity:0.4;text-decoration:line-through;':'')+'" class="'+(hidden?'':'active')+'"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:'+m.c+';margin-right:3px"></span>'+m.l+'</button>';
       });
@@ -1236,7 +1247,7 @@ function toggleStatusMetric(cid,metric){
   if(!_statusHidden[cid])_statusHidden[cid]={};
   _statusHidden[cid][metric]=!_statusHidden[cid][metric];
   // Count visible — must have at least 1
-  var vis=['spend','rpi','ipm'].filter(function(k){return !_statusHidden[cid][k];});
+  var vis=['revenue','rpi','ipm'].filter(function(k){return !_statusHidden[cid][k];});
   if(vis.length===0){_statusHidden[cid][metric]=false;return;}
   renderStatusDetail();
 }
@@ -1244,7 +1255,7 @@ function toggleStatusMetric(cid,metric){
 function renderStatusMiniChart(points,cp,cid){
   var hidden=_statusHidden[cid]||{};
   var ALL=[
-    {k:'spend',lbl:'Spend',fmt:function(v){return '$'+Math.round(v);},color:'#555FFF',type:'bar'},
+    {k:'revenue',lbl:'Gross revenue',fmt:function(v){return '$'+Math.round(v);},color:'#555FFF',type:'bar'},
     {k:'rpi',lbl:'RPI',fmt:function(v){return '$'+v.toFixed(1);},color:'#ED0303',type:'line'},
     {k:'ipm',lbl:'IPM',fmt:function(v){return v.toFixed(2);},color:'#1CAA53',type:'line'}
   ];
@@ -1353,25 +1364,26 @@ function fetchDiagnosisFor(cidIn){
     var grpKey=cp?cp.competing_group:'unknown';
     var grpCreatives=(R.creativePerf||[]).filter(function(c){return c.competing_group===grpKey;});
     var activeInGroup=grpCreatives.filter(function(c){return c.status==='active';}).length;
-    var totalSpend=R.totalSpend||((R.creativePerf||[]).reduce(function(s,c){return s+(c.spend||0);},0));
-    // Compute spend share within MCO inventory format group (not campaign-level SOW)
-    var grpTotalSpend=grpCreatives.reduce(function(s,c){return s+(c.spend||0);},0);
-    var fmtSpendShare=cp&&grpTotalSpend>0?((cp.spend||0)/grpTotalSpend*100):null;
+    var totalSpend=(R.creativePerf||[]).reduce(function(s,c){return s+moneyOf(c);},0);
+    // Share of the MCO inventory group's GROSS REVENUE (not campaign-level SOW). The key stays
+    // spend_share_pct because that is the platform's term and what MCO_RULES/SKILL.md call it.
+    var grpTotalSpend=grpCreatives.reduce(function(s,c){return s+moneyOf(c);},0);
+    var fmtSpendShare=cp&&grpTotalSpend>0?(moneyOf(cp)/grpTotalSpend*100):null;
     var payload={
       creative_id:cid,status:'auto_paused',inventory_format:grpKey,
-      spend:cp?cp.spend:null,spend_share_pct:fmtSpendShare,
+      gross_revenue:cp?moneyOf(cp):null,spend_share_pct:fmtSpendShare,
       iti:cp&&cp.iti!=null?(cp.iti*100).toFixed(3)+'%':null,
       roas:cp?cp.roas:null,rpa:cp?cp.rpa:null,rpi:cp?cp.rpi:null,
       paused_by:entry.changed_by||'unknown',is_cpa_campaign:cp?cp.is_cpa_campaign:false,
       creative_selection_model:R.mcoEnabled?'MCO':'free_floating',question_type:'why_paused',
       device_targeting:R.deviceTargeting||'unknown',
-      campaign_spend_share:cp&&totalSpend>0?((cp.spend||0)/totalSpend*100).toFixed(1)+'%':'N/A',
+      campaign_spend_share:cp&&totalSpend>0?(moneyOf(cp)/totalSpend*100).toFixed(1)+'%':'N/A',
       format_spend_share:fmtSpendShare!=null?fmtSpendShare.toFixed(1)+'%':'N/A',
       active_same_format:activeInGroup,
       total_same_format:grpCreatives.length,
       competition_group:grpCreatives.map(function(c){
-        var cFmtShare=grpTotalSpend>0?((c.spend||0)/grpTotalSpend*100):null;
-        return {creative_id:String(c.creative_id),status:c.status,iti:c.iti!=null?(c.iti*100).toFixed(3)+'%':null,spend:c.spend,spend_share_pct:cFmtShare,inventory_format:c.competing_group};
+        var cFmtShare=grpTotalSpend>0?(moneyOf(c)/grpTotalSpend*100):null;
+        return {creative_id:String(c.creative_id),status:c.status,iti:c.iti!=null?(c.iti*100).toFixed(3)+'%':null,gross_revenue:moneyOf(c),spend_share_pct:cFmtShare,inventory_format:c.competing_group};
       })
     };
     if(_isAppsScript){
@@ -1390,7 +1402,7 @@ function enrichDiag(diag,payload){
   if(!diag)return diag;
   if(!diag.supporting_evidence)diag.supporting_evidence=[];
   if(payload.campaign_spend_share&&payload.campaign_spend_share!=='N/A')
-    diag.supporting_evidence.push('Campaign spend share before pause: '+payload.campaign_spend_share);
+    diag.supporting_evidence.push('Campaign gross-revenue share before pause: '+payload.campaign_spend_share);
   if(payload.active_same_format!=null)
     diag.supporting_evidence.push('After pause: '+payload.active_same_format+' active creatives remain in '+invToDN(payload.inventory_format)+' (of '+payload.total_same_format+' total)');
   return diag;
@@ -1471,14 +1483,14 @@ function requestAiInsights(){
   var fmSummary={};
   (R.creativePerf||[]).forEach(function(c){
     var dn=invToDN(c.competing_group);
-    if(!fmSummary[dn])fmSummary[dn]={format:dn,spend:0,revenue:0,custRevS:0,revS:0,rev1S:0,inst1S:0,rpaRevS:0,evtS:0,count:0};
-    var f=fmSummary[dn];var _rev=c.revenue||0;f.spend+=(c.spend||0);f.revenue+=_rev;f.count++;
+    if(!fmSummary[dn])fmSummary[dn]={format:dn,revenue:0,custRevS:0,revS:0,rev1S:0,inst1S:0,rpaRevS:0,evtS:0,count:0};
+    var f=fmSummary[dn];var _rev=moneyOf(c);f.revenue+=_rev;f.count++;
     if(c.roas!=null&&_rev>0){f.custRevS+=c.roas*_rev;f.revS+=_rev;}
     if(c.rpi!=null&&c.installs>0){f.rev1S+=c.rpi*c.installs;f.inst1S+=c.installs;}
     if(c.rpa!=null&&c.target_events_d7>0){f.rpaRevS+=c.rpa*c.target_events_d7;f.evtS+=c.target_events_d7;}
     else if(c.rpa!=null&&_rev>0){f.rpaRevS+=_rev;f.evtS+=_rev/c.rpa;}
   });
-  var fmForAI=Object.values(fmSummary).map(function(f){return{format:f.format,spend:Math.round(f.spend),revenue:Math.round(f.revenue),roas_d7:f.revS>0?+(f.custRevS/f.revS).toFixed(4):null,rpi:f.inst1S>0?+(f.rev1S/f.inst1S).toFixed(2):null,rpa:f.evtS>0?+(f.rpaRevS/f.evtS).toFixed(2):null,count:f.count};}).sort(function(a,b){return b.spend-a.spend;});
+  var fmForAI=Object.values(fmSummary).map(function(f){return{format:f.format,gross_revenue:Math.round(f.revenue),roas_d7:f.revS>0?+(f.custRevS/f.revS).toFixed(4):null,rpi:f.inst1S>0?+(f.rev1S/f.inst1S).toFixed(2):null,rpa:f.evtS>0?+(f.rpaRevS/f.evtS).toFixed(2):null,count:f.count};}).sort(function(a,b){return b.gross_revenue-a.gross_revenue;});
   var trendPayload={
     campaign_type:R.campType,campaign_label:R.campTypeLabel,
     is_cpa:R._isCpa,mco_enabled:R.mcoEnabled,optimization_state:R.optimizationState,
@@ -1550,11 +1562,11 @@ function localMcoDiagnosis(p){
   }
   // If creative was very recently created AND has very low spend → could be exploring/newly_optimizing.
   // The day window is a display heuristic (calibration + a few days of margin), not a rule.
-  if(daysLive!=null&&daysLive<=DMIN+3&&(p.spend||0)<50){
-    if((p.spend||0)===0){
+  if(daysLive!=null&&daysLive<=DMIN+3&&(p.gross_revenue||0)<50){
+    if((p.gross_revenue||0)===0){
       return {diagnosis:'exploring_throttle_queued',format:dn,
-        explanation:'CID '+p.creative_id+' in '+dn+' appears to be in the creative throttle queue. With '+daysLive+' days live and $0 spend, it is waiting for exploration capacity to open up.',
-        supporting_evidence:['Creative is '+daysLive+' days old with zero spend','Creative throttle limits: min '+MR.throttle.min_capacity_per_format+' exploring creatives per inventory format','Capacity scales with campaign spend level'],
+        explanation:'CID '+p.creative_id+' in '+dn+' appears to be in the creative throttle queue. With '+daysLive+' days live and $0 gross revenue, it is waiting for exploration capacity to open up.',
+        supporting_evidence:['Creative is '+daysLive+' days old with zero gross revenue','Creative throttle limits: min '+MR.throttle.min_capacity_per_format+' exploring creatives per inventory format','Capacity scales with campaign spend level'],
         suggested_actions:['Wait for capacity — the creative will start receiving WCS impressions when a slot opens','Check if too many creatives were uploaded simultaneously to the same inventory format'],
         confidence:'medium'};
     }
@@ -1674,8 +1686,8 @@ function localFormatSummary(){
   var fmtMap={};
   perfs.forEach(function(c){
     var dn=c.mco_group||invToDN(c.competing_group);
-    if(!fmtMap[dn])fmtMap[dn]={spend:0,rev:0,custRevS:0,revS:0,rev1S:0,inst1S:0,rpaRevS:0,evtS:0,instD7S:0,impS:0,roasN:0,rpiN:0,rpaN:0,itiN:0,count:0,active:0,paused:0};
-    var f=fmtMap[dn];var _r=c.revenue||0;f.spend+=(c.spend||0);f.rev+=_r;f.count++;
+    if(!fmtMap[dn])fmtMap[dn]={rev:0,custRevS:0,revS:0,rev1S:0,inst1S:0,rpaRevS:0,evtS:0,instD7S:0,impS:0,roasN:0,rpiN:0,rpaN:0,itiN:0,count:0,active:0,paused:0};
+    var f=fmtMap[dn];var _r=moneyOf(c);f.rev+=_r;f.count++;
     if(c.status==='active')f.active++;else f.paused++;
     if(c.roas!=null&&_r>0){f.custRevS+=c.roas*_r;f.revS+=_r;f.roasN++;}
     if(c.rpi!=null&&c.installs>0){f.rev1S+=c.rpi*c.installs;f.inst1S+=c.installs;f.rpiN++;}
@@ -1684,8 +1696,8 @@ function localFormatSummary(){
     if(c.iti!=null&&c.impressions>0){f.instD7S+=c.iti*c.impressions;f.impS+=c.impressions;f.itiN++;}
     else if(c.iti!=null){f.instD7S+=c.iti;f.impS+=1;f.itiN++;} // no impression data — treat as single sample
   });
-  var totalSpend=Object.values(fmtMap).reduce(function(s,f){return s+f.spend;},0)||1;
-  var sorted=Object.keys(fmtMap).sort(function(a,b){return fmtMap[b].spend-fmtMap[a].spend;});
+  var totalSpend=Object.values(fmtMap).reduce(function(s,f){return s+f.rev;},0)||1;
+  var sorted=Object.keys(fmtMap).sort(function(a,b){return fmtMap[b].rev-fmtMap[a].rev;});
   // Detect trends from daily data (first half vs second half)
   var trendMap={};
   if(dailyFmt.length>0){
@@ -1710,7 +1722,7 @@ function localFormatSummary(){
   }
   // Build insights — reference MCO mechanics
   var insights=sorted.slice(0,6).map(function(dn){
-    var f=fmtMap[dn],sowPct=(f.spend/totalSpend*100).toFixed(1);
+    var f=fmtMap[dn],sowPct=(f.rev/totalSpend*100).toFixed(1);
     var perfStr=isCpa?(f.evtS>0?'RPA $'+(f.rpaRevS/f.evtS).toFixed(2):''):(f.revS>0?'7D ROAS '+(f.custRevS/f.revS*100).toFixed(1)+'%':'');
     var cpiStr=f.inst1S>0?'RPI $'+(f.rev1S/f.inst1S).toFixed(2):'';
     var _wIti=f.impS>0?f.instD7S/f.impS:null;
@@ -1718,15 +1730,15 @@ function localFormatSummary(){
     var trend=trendMap[dn]||'stable';
     var coverageNote=f.paused>0?(f.active+' active, '+f.paused+' paused'):(f.active+' active');
     // Build the insight sentence
-    var parts=[sowPct+'% of spend ('+coverageNote+').'];
+    var parts=[sowPct+'% of gross revenue ('+coverageNote+').'];
     if(perfStr)parts.push(perfStr+'.');
     var _wRpi=f.inst1S>0?f.rev1S/f.inst1S:null;if(cpiStr)parts.push(cpiStr+(_wRpi!=null&&_wRpi>4?' (high install cost — review efficiency).':_wRpi!=null&&_wRpi<1?' (very low install cost — efficient).':'.'));
     var _topF=fmtMap[sorted[0]]||{};var _topIti=(_topF.impS>0)?_topF.instD7S/_topF.impS:0;
-    if(itiStr)parts.push(itiStr+' — '+(_wIti!=null&&_wIti>=_topIti?'strong install conversion.':'lower ITI — ML pricing determines format-level spend distribution.'));
+    if(itiStr)parts.push(itiStr+' — '+(_wIti!=null&&_wIti>=_topIti?'strong install conversion.':'lower ITI — ML pricing determines format-level gross-revenue distribution.'));
     return {format:dn,trend:trend,insight:parts.join(' ')};
   });
   // Summary
-  var topFmt=sorted[0]||'';var topSow=fmtMap[topFmt]?(fmtMap[topFmt].spend/totalSpend*100).toFixed(0):'0';
+  var topFmt=sorted[0]||'';var topSow=fmtMap[topFmt]?(fmtMap[topFmt].rev/totalSpend*100).toFixed(0):'0';
   var primaryMetric=metricLabel(primaryMetricKey(R&&R.campType));
   // Find best and worst performers
   var bestFmt='',worstFmt='',bestVal=-Infinity,worstVal=Infinity;
@@ -1736,25 +1748,25 @@ function localFormatSummary(){
     var val=isCpa?(f.evtS>0?f.rpaRevS/f.evtS:null):(f.revS>0?f.custRevS/f.revS:null);
     if(val!=null){
       if(isCpa){if(val<bestVal||bestVal===-Infinity){bestVal=val;bestFmt=dn;}if(val>worstVal||worstVal===Infinity){worstVal=val;worstFmt=dn;}}
-      else{if(val>bestVal){bestVal=val;bestFmt=dn;}if(val<worstVal&&f.spend>totalSpend*0.05){worstVal=val;worstFmt=dn;}}
+      else{if(val>bestVal){bestVal=val;bestFmt=dn;}if(val<worstVal&&f.rev>totalSpend*0.05){worstVal=val;worstFmt=dn;}}
     }
     var cpi=f.inst1S>0?f.rev1S/f.inst1S:null;
     if(cpi!=null){if(cpi<lowestCpi){lowestCpi=cpi;lowestCpiFmt=dn;}if(cpi>highestCpi){highestCpi=cpi;highestCpiFmt=dn;}}
   });
-  var summaryParts=[topFmt+' dominates spend at '+topSow+'% — ML pricing favors this format\'s ad groups in the internal auction, concentrating budget on the highest-value inventory.'];
+  var summaryParts=[topFmt+' dominates gross revenue at '+topSow+'% — ML pricing favors this format\'s ad groups in the internal auction, concentrating budget on the highest-value inventory.'];
   if(bestFmt){
     var bfStr=isCpa?'$'+bestVal.toFixed(2)+' RPA (lowest cost per event)':(bestVal*100).toFixed(1)+'% 7D ROAS';
     summaryParts.push(bestFmt+' is the top performer with '+bfStr+'.');
   }
   if(worstFmt&&worstFmt!==bestFmt){
     var wfStr=isCpa?'$'+worstVal.toFixed(2)+' RPA (highest cost per event)':(worstVal*100).toFixed(1)+'% 7D ROAS';
-    summaryParts.push(worstFmt+' lags at '+wfStr+(fmtMap[worstFmt]&&fmtMap[worstFmt].spend/totalSpend>0.1?' despite taking '+((fmtMap[worstFmt].spend/totalSpend*100).toFixed(0))+'% of spend.':'.'));
+    summaryParts.push(worstFmt+' lags at '+wfStr+(fmtMap[worstFmt]&&fmtMap[worstFmt].spend/totalSpend>0.1?' despite taking '+((fmtMap[worstFmt].rev/totalSpend*100).toFixed(0))+'% of gross revenue.':'.'));
   }
   // Recommendation — incorporate MCO knowledge
   var rec='';
   var mcoNote=R.mcoEnabled?'This campaign uses MCO — creative selection within each ad group is based on ITI (install rate), but format-level spend distribution is determined by ML pricing, not MCO. ':'This campaign is Free-floating — creative selection is random among eligible creatives. ';
   if(worstFmt&&fmtMap[worstFmt]&&fmtMap[worstFmt].spend/totalSpend>0.1){
-    rec=mcoNote+worstFmt+' takes '+((fmtMap[worstFmt].spend/totalSpend*100).toFixed(0))+'% of spend but has the weakest '+primaryMetric+'. '+(R.mcoEnabled?'MCO selects creatives by ITI within each ad group, but format-level spend is driven by ML pricing. The format\'s creatives may have high ITI but poor downstream value (ITI-ROAS disconnect). Consider refreshing creatives or pausing underperformers.':'Consider pausing underperformers in this format.');
+    rec=mcoNote+worstFmt+' takes '+((fmtMap[worstFmt].rev/totalSpend*100).toFixed(0))+'% of gross revenue but has the weakest '+primaryMetric+'. '+(R.mcoEnabled?'MCO selects creatives by ITI within each ad group, but format-level spend is driven by ML pricing. The format\'s creatives may have high ITI but poor downstream value (ITI-ROAS disconnect). Consider refreshing creatives or pausing underperformers.':'Consider pausing underperformers in this format.');
   } else if(lowestCpiFmt&&highestCpiFmt&&lowestCpiFmt!==highestCpiFmt&&highestCpi>lowestCpi*1.5){
     rec=mcoNote+highestCpiFmt+' has install cost (RPI) $'+highestCpi.toFixed(2)+' vs '+lowestCpiFmt+' at $'+lowestCpi.toFixed(2)+' — '+((highestCpi/lowestCpi).toFixed(1))+'x more expensive per install. Lower RPI doesn\'t always mean better user quality — check downstream 7D ROAS/RPA to confirm.';
   } else if(bestFmt){
@@ -1819,15 +1831,15 @@ function renderFormatSummary(data){
 }
 
 /* ═══════════════════════════════════════════════════════════
-   COMBINED CHART: Format Spend (1/4) + Revenue Over Time (3/4)
+   COMBINED CHART: Format Gross Revenue (1/4) + Revenue Over Time (3/4)
    Shared interactive legend below
    ═══════════════════════════════════════════════════════════ */
 function getLegendLabels(){
   var grps={};(R.creativePerf||[]).forEach(function(c){
-    if(c.is_metricless)return;   // never served — no spend to attribute, see seriesFromPerf
+    if(c.is_metricless)return;   // never served — no revenue to attribute, see seriesFromPerf
     // Use mco_group if available (set by Code.gs toMcoGroup), else invToDN on competing_group
     var lbl=c.mco_group||invToDN(c.competing_group);
-    grps[lbl]=(grps[lbl]||0)+(c.spend||0);
+    grps[lbl]=(grps[lbl]||0)+moneyOf(c);
   });
   return Object.keys(grps).sort(function(a,b){return grps[b]-grps[a];});
 }
@@ -1840,7 +1852,7 @@ function renderCombinedChartModule(){
     {val:'roas_d1',lbl:'D1 ROAS'},{val:'rpa',lbl:'RPA'}
   ];
   var h='<div class="module" style="padding:16px 20px 12px"><div class="mod-h">';
-  h+='<h3>Format Spend &amp; Revenue Over Time</h3>';
+  h+='<h3>Format Gross Revenue Over Time</h3>';
   h+='<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">';
   // Multi-select metric toggles (up to 4)
   h+='<div class="ctoggle" style="gap:2px">';
@@ -1851,9 +1863,9 @@ function renderCombinedChartModule(){
   h+='</div>';
   h+='</div></div>';
   h+='<div id="sharedLegend" class="legend-wrap" style="padding:6px 0 10px;border-bottom:1px solid var(--bd);margin-bottom:10px">'+renderLegend()+'</div>';
-  // Layout: left 1/4 spend, right 3/4 metric charts (right side resizable)
+  // Layout: left 1/4 gross revenue, right 3/4 metric charts (right side resizable)
   h+='<div style="display:grid;grid-template-columns:1fr 3fr;gap:12px;align-items:start">';
-  // Left: spend chart with bar/donut toggle
+  // Left: gross-revenue chart with bar/donut toggle
   h+='<div><div style="display:flex;justify-content:flex-end;margin-bottom:4px">';
   h+='<div class="ctoggle"><button data-act="setSpendChart" data-val="bar"'+(_spendChart==="bar"?' class="active"':"")+'>Bar</button><button data-act="setSpendChart" data-val="donut"'+(_spendChart==="donut"?' class="active"':"")+'>Donut</button></div>';
   h+='</div><div id="spendChartInner">'+renderSpendInner()+'</div></div>';
@@ -1884,10 +1896,10 @@ function renderSingleMetricChart(metric){
 
 function seriesFromPerf(){
   var grps={};
-  // Skip metric-less rows (queued creatives that never served). They have no spend, so they
-  // would add 0-value slices and 0% legend rows to a spend-share chart, and they would take
+  // Skip metric-less rows (queued creatives that never served). They have no revenue, so they
+  // would add 0-value slices and 0% legend rows to a revenue-share chart, and they would take
   // colour slots that shift every other format's colour. They belong in the table, not here.
-  (R.creativePerf||[]).forEach(function(c){if(c.is_metricless)return;var lbl=c.mco_group||invToDN(c.competing_group);grps[lbl]=(grps[lbl]||0)+(c.spend||0);});
+  (R.creativePerf||[]).forEach(function(c){if(c.is_metricless)return;var lbl=c.mco_group||invToDN(c.competing_group);grps[lbl]=(grps[lbl]||0)+moneyOf(c);});
   var total=0;Object.keys(grps).forEach(function(k){total+=grps[k];});
   return Object.keys(grps).sort(function(a,b){return grps[b]-grps[a];}).map(function(k){return {label:k,value:grps[k],pct:total>0?+(grps[k]/total*100).toFixed(1):0};});
 }
@@ -1949,7 +1961,7 @@ function renderSpendInner(){
   (R.creativePerf||[]).forEach(function(c){
     var lbl=c.mco_group||invToDN(c.competing_group);
     if(!perfByGroup[lbl])perfByGroup[lbl]={rev1S:0,inst1S:0,custRevS:0,revS:0,rpaRevS:0,evtS:0,sRpiS:0,sRpiN:0,sRoasS:0,sRoasN:0,sRpaS:0,sRpaN:0};
-    var g=perfByGroup[lbl];var rev=c.revenue||0;var wR=rev>0?rev:(c.spend||0);
+    var g=perfByGroup[lbl];var rev=moneyOf(c);var wR=rev;
     if(c.rpi!=null){g.sRpiS+=c.rpi;g.sRpiN++;if(c.installs>0){g.rev1S+=c.rpi*c.installs;g.inst1S+=c.installs;}}
     if(c.roas!=null){g.sRoasS+=c.roas;g.sRoasN++;if(wR>0){g.custRevS+=c.roas*wR;g.revS+=wR;}}
     if(c.rpa!=null){g.sRpaS+=c.rpa;g.sRpaN++;
@@ -2172,9 +2184,9 @@ function aggregateBreakdown(){
   var perfs=R.creativePerf||[];
   var videoMap={},interMap={};
   function acc(map,key,c){
-    if(!map[key])map[key]={label:key,spend:0,rev:0,rev1S:0,inst1S:0,custRevS:0,revS:0,rpaRevS:0,evtS:0,instD7S:0,impS:0,count:0,sRpiS:0,sRpiN:0,sRoasS:0,sRoasN:0,sRpaS:0,sRpaN:0,sItiS:0,sItiN:0};
-    var m=map[key];var rev=c.revenue||0;var wR=rev>0?rev:(c.spend||0);
-    m.spend+=(c.spend||0);m.rev+=rev;m.count++;
+    if(!map[key])map[key]={label:key,money:0,rev:0,rev1S:0,inst1S:0,custRevS:0,revS:0,rpaRevS:0,evtS:0,instD7S:0,impS:0,count:0,sRpiS:0,sRpiN:0,sRoasS:0,sRoasN:0,sRpaS:0,sRpaN:0,sItiS:0,sItiN:0};
+    var m=map[key];var rev=moneyOf(c);var wR=rev;
+    m.money+=rev;m.rev+=rev;m.count++;
     if(c.rpi!=null){m.sRpiS+=c.rpi;m.sRpiN++;if(c.installs>0){m.rev1S+=c.rpi*c.installs;m.inst1S+=c.installs;}}
     if(c.roas!=null){m.sRoasS+=c.roas;m.sRoasN++;if(wR>0){m.custRevS+=c.roas*wR;m.revS+=wR;}}
     if(c.rpa!=null){m.sRpaS+=c.rpa;m.sRpaN++;
@@ -2206,8 +2218,8 @@ function aggregateBreakdown(){
 }
 
 function buildBdChart(title, dataMap, colorMap, chartType, ctx){
-  var rows=Object.values(dataMap).sort(function(a,b){return b.spend-a.spend;});
-  var totalSpend=rows.reduce(function(s,r){return s+r.spend;},0)||1;
+  var rows=Object.values(dataMap).sort(function(a,b){return b.money-a.money;});
+  var totalSpend=rows.reduce(function(s,r){return s+r.money;},0)||1;
   var isPrimRpa=R&&R._isCpa;
   var h='<div class="bd-chart">';
   h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
@@ -2225,7 +2237,7 @@ function buildBdChart(title, dataMap, colorMap, chartType, ctx){
     var svg='<svg viewBox="0 0 '+bdSz+' '+bdSz+'" width="'+bdSz+'" height="'+bdSz+'" style="display:block;margin:0 auto">';
     var ang=-Math.PI/2;
     rows.forEach(function(row){
-      var pct=row.spend/totalSpend;
+      var pct=row.money/totalSpend;
       var sweep=pct*2*Math.PI;
       var ea=ang+sweep;
       var x1=bcx+br*Math.cos(ang),y1=bcy+br*Math.sin(ang);
@@ -2245,7 +2257,7 @@ function buildBdChart(title, dataMap, colorMap, chartType, ctx){
   } else {
     h+='<div>';
     rows.forEach(function(row){
-      var pct=(row.spend/totalSpend*100).toFixed(1);
+      var pct=(row.money/totalSpend*100).toFixed(1);
       var clr=colorMap[row.label]||COLORS[0];
       h+='<div class="bd-bar-row">';
       h+='<div class="bd-lbl">'+row.label+'<br><span style="font-size:var(--f7);color:var(--tx3)">'+row.count+' creatives</span></div>';
@@ -2324,15 +2336,15 @@ function renderBreakdownCharts(){
  */
 function bdBucket(map,label){
   var m=(map||{})[label]||{};
-  return {label:label,spend:m.spend||0,count:m.count||0,
+  return {label:label,money:m.money||0,count:m.count||0,
     roas:(m.roasN>0?m.roasS/m.roasN:null),
     rpa:(m.rpaN>0?m.rpaS/m.rpaN:null),
     rpi:(m.rpiN>0?m.rpiS/m.rpiN:null)};
 }
 
-/** Spend across EVERY slice including 'N/A' — the same denominator buildBdChart uses for its %. */
+/** Gross revenue across EVERY slice including 'N/A' — buildBdChart's own denominator for its %. */
 function bdTotalSpend(map){
-  return Object.keys(map||{}).reduce(function(s,k){return s+(map[k].spend||0);},0)||1;
+  return Object.keys(map||{}).reduce(function(s,k){return s+(map[k].money||0);},0)||1;
 }
 
 /**
@@ -2343,11 +2355,11 @@ function bdTotalSpend(map){
 function bdSharedBullets(map,aLabel,bLabel){
   var a=bdBucket(map,aLabel),b=bdBucket(map,bLabel),total=bdTotalSpend(map);
   var pk=primaryMetricKey(R.campType),lowerBetter=isCostMetric(pk);
-  var aPct=(a.spend/total*100).toFixed(0),bPct=(b.spend/total*100).toFixed(0);
+  var aPct=(a.money/total*100).toFixed(0),bPct=(b.money/total*100).toFixed(0);
   var aV=pk==='rpa'?a.rpa:a.roas,bV=pk==='rpa'?b.rpa:b.roas;
   var fmt=function(v){return lowerBetter?'$'+v.toFixed(2):(v*100).toFixed(1)+'%';};
   var bullets=[];
-  bullets.push('<b>'+aLabel+'</b> '+aPct+'% of spend ('+a.count+' creatives) &middot; <b>'+bLabel+'</b> '+bPct+'% ('+b.count+' creatives)');
+  bullets.push('<b>'+aLabel+'</b> '+aPct+'% of gross revenue ('+a.count+' creatives) &middot; <b>'+bLabel+'</b> '+bPct+'% ('+b.count+' creatives)');
   var lead=null;
   if(aV!=null&&bV!=null){
     lead=(aV===bV)?null:((lowerBetter?aV<bV:aV>bV)?a:b);
@@ -2380,7 +2392,7 @@ function localVideoSummary(agg){
   var bullets=s.bullets,gap=bdGap(s);
   if(gap!=null&&gap>0.1&&s.lead){
     var weak=s.lead.label==='Video'?{label:'Non-video',pct:s.bPct}:{label:'Video',pct:s.aPct};
-    bullets.push('<span style="color:var(--am)">Note:</span> '+weak.label+' uses '+weak.pct+'% of spend but underperforms on '+s.metricLabel+'. '+(R.mcoEnabled?'Format-level spend is determined by ML pricing, not MCO. MCO only selects creatives within each ad group by ITI':'Consider rebalancing creative mix'));
+    bullets.push('<span style="color:var(--am)">Note:</span> '+weak.label+' takes '+weak.pct+'% of gross revenue but underperforms on '+s.metricLabel+'. '+(R.mcoEnabled?'Format-level spend is determined by ML pricing, not MCO. MCO only selects creatives within each ad group by ITI':'Consider rebalancing creative mix'));
   }
   if(R.mcoEnabled)bullets.push('<span style="color:var(--peri)">MCO context:</span> Creative selection is ITI-based. Video creatives typically have higher ITI due to user engagement — MCO may favor them regardless of ROAS/RPA.');
   else bullets.push('<span style="color:var(--tx3)">Free-floating:</span> Creative selection is random. Spend should be roughly proportional to eligible creative count per type.');
@@ -2406,7 +2418,7 @@ function bdForAI(){
   [['video',agg.videoMap],['interactive',agg.interMap]].forEach(function(p){
     Object.keys(p[1]).forEach(function(k){
       var b=bdBucket(p[1],k);
-      out.push({dimension:p[0],value:k,spend:Math.round(b.spend),creative_count:b.count,
+      out.push({dimension:p[0],value:k,gross_revenue:Math.round(b.money),creative_count:b.count,
         roas_d7:b.roas!=null?+b.roas.toFixed(4):null,
         rpa:b.rpa!=null?+b.rpa.toFixed(2):null,
         rpi:b.rpi!=null?+b.rpi.toFixed(2):null});
@@ -2431,7 +2443,7 @@ function renderMergedTable(){
   var now=new Date(),groups={};
   // Seed a row per format the campaign can actually serve on. Formats it cannot target are not
   // gaps — a phone-only campaign showing five empty Tablet rows reads as "you're missing these".
-  ALL_DN.filter(formatServesDevice).forEach(function(dn){groups[dn]={name:dn,creatives:[],spend:0,active:0,paused:0,newestDays:9999,hasStale:false};});
+  ALL_DN.filter(formatServesDevice).forEach(function(dn){groups[dn]={name:dn,creatives:[],money:0,active:0,paused:0,newestDays:9999,hasStale:false};});
   var isPrimRpa=!!(R&&R._isCpa);
 
   // Campaign averages from SQL (weighted, not creative-level average)
@@ -2510,9 +2522,9 @@ function renderMergedTable(){
 
   (R.creativePerf||[]).forEach(function(c){
     var dn=c.mco_group||invToDN(c.competing_group);
-    if(!groups[dn])groups[dn]={name:dn,creatives:[],spend:0,active:0,paused:0,newestDays:9999,hasStale:false};
+    if(!groups[dn])groups[dn]={name:dn,creatives:[],money:0,active:0,paused:0,newestDays:9999,hasStale:false};
     if(dn==='Unknown')return; // skip Unknown
-    var g=groups[dn];g.creatives.push(c);g.spend+=(c.spend||0);
+    var g=groups[dn];g.creatives.push(c);g.money+=moneyOf(c);
     if(c.status==='active')g.active++;else g.paused++;
     if(c.created_date){var d=new Date(c.created_date),diff=Math.floor((now-d)/864e5);if(diff<g.newestDays)g.newestDays=diff;var _fd=TH('FRESHNESS_DAYS');if(_fd!=null&&diff>=_fd)g.hasStale=true;}
   });
@@ -2522,7 +2534,7 @@ function renderMergedTable(){
     if(aH!==bH)return bH-aH;
     var sc=_tableSort.col,mult=_tableSort.dir==='asc'?1:-1;
     function grpVal(g){
-      if(sc==='spend')return g.spend||0;
+      if(sc==='spend')return g.money||0;   // the sort key name is the column id, not the metric
       if(sc==='fresh')return g.newestDays||9999;
       // Compute group avg for metric columns
       var s=0,n=0;
@@ -2540,7 +2552,7 @@ function renderMergedTable(){
     var fm=(isCostMetric(sc)||sc==='fresh')?-mult:mult;
     return (av-bv)*fm;
   });
-  var gSpend=sorted.reduce(function(s,g){return s+g.spend;},0)||1;
+  var gSpend=sorted.reduce(function(s,g){return s+g.money;},0)||1;
   var actFmts=sorted.filter(function(g){return g.creatives.length>0;}).length;
   var h='<div class="module" style="padding:0;overflow:hidden"><div class="mod-h" style="padding:16px 20px 0"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h3>Creative Performance by Format</h3><span class="badge badge-b">'+R.totalCreatives+' creatives &middot; '+actFmts+' formats</span><div style="display:flex;gap:4px;margin-left:auto"><button data-act="exportTable" data-fmt="tsv" style="font-size:var(--f7);padding:3px 10px;border:1.5px solid var(--bd);border-radius:8px;background:var(--sf);color:var(--tx2);cursor:pointer;font-family:inherit;font-weight:500">&#8681; Excel</button></div></div>';
   // Column toggles — inline in header
@@ -2598,7 +2610,7 @@ function renderMergedTable(){
   var primaryCiHdr=isPrimRpa?'RPA CI':'ROAS CI';
   h+='<th style="min-width:180px;text-align:left">Format</th><th>Coverage</th>';
   if(!hc['freshness'])h+=thSort('fresh','Freshness');
-  h+=thSort('spend','Spend')+'<th>SOW</th>';
+  h+=thSort('spend','Gross revenue')+'<th>SOW</th>';
   if(!hc['iti'])h+=thSort('iti','ITI');
   if(!hc['ipm'])h+=thSort('ipm','IPM');
   if(!hc['rpi'])h+=thSort('rpi','RPI');
@@ -2619,7 +2631,7 @@ function renderMergedTable(){
   h+='<td style="padding:10px;color:var(--peri);font-weight:700;font-size:12px">&#128202; Campaign</td>';
   h+='<td></td>'; // coverage
   if(!hc['freshness'])h+='<td></td>';
-  h+='<td class="mono" style="padding:10px;color:var(--peri)">'+(_cp.spend?'$'+Math.round(_cp.spend).toLocaleString():'&mdash;')+'</td>';
+  h+='<td class="mono" style="padding:10px;color:var(--peri)">'+(moneyOf(_cp)>0?'$'+Math.round(moneyOf(_cp)).toLocaleString():'&mdash;')+'</td>';
   h+='<td></td>'; // SOW
   if(!hc['iti'])h+='<td class="mono" style="padding:10px">'+(_cp.iti!=null?_cp.iti.toFixed(6):'&mdash;')+'</td>';
   if(!hc['ipm'])h+='<td class="mono" style="padding:10px">'+(_cp.ipm!=null?_cp.ipm.toFixed(2):'&mdash;')+'</td>';
@@ -2677,7 +2689,7 @@ function renderMergedTable(){
     g.creatives.forEach(function(c){
       var rev=c.revenue||0;
       // Weighted (preferred): fallback weight = spend if revenue missing
-      var wR=rev>0?rev:(c.spend||0);
+      var wR=rev;
       if(c.roas!=null){sRoasS+=c.roas;sRoasN++;if(wR>0){custRevS+=c.roas*wR;revS+=wR;roasN++;}}
       if(c.rpi!=null){sRpiS+=c.rpi;sRpiN++;if(c.installs>0){rev1S+=c.rpi*c.installs;inst1S+=c.installs;rpiN++;}}
       if(c.roas_d1!=null){sRoas1S+=c.roas_d1;sRoas1N++;if(wR>0){roas1NumS+=c.roas_d1*wR;roas1DenS+=wR;roas1N++;}}
@@ -2721,7 +2733,7 @@ function renderMergedTable(){
     h+='<tr class="fc-group'+(autoExpand?' open':'')+'" data-gi="'+gi+'">';
     h+='<td style="text-align:left"><span class="fc-arr">&#9658;</span> '+g.name+shownHint+(autoExpand?' <span style="font-size:8px;color:var(--peri)">'+groupMatchCids.length+' match</span>':'')+'</td><td>'+cov+'</td>';
     if(!hc['freshness'])h+='<td>'+fresh+'</td>';
-    h+='<td class="mono">'+(g.spend>0?'$'+Math.round(g.spend).toLocaleString():'&mdash;')+'</td>';
+    h+='<td class="mono">'+(g.money>0?'$'+Math.round(g.money).toLocaleString():'&mdash;')+'</td>';
     h+='<td>'+sowBar+'</td>';
     if(!hc['iti'])h+='<td class="mono">'+aIti+'</td>';
     if(!hc['ipm'])h+='<td class="mono">'+aIpm+'</td>';
@@ -2762,7 +2774,7 @@ function renderMergedTable(){
       // still reads Active above — this tag is the only thing that says it left the campaign.
       // Counts are deliberately untouched (see the server-side note in Code.js).
       if(c.is_unassigned)cst+=' <span class="tag tag-a" title="Unassigned from this campaign'+(c.unassigned_date?' on '+c.unassigned_date:'')+'">Detached</span>';
-      var cs=((c.spend||0)/gSpend*100).toFixed(1);
+      var cs=(moneyOf(c)/gSpend*100).toFixed(1);
       var cBar=cs+'%';
       var cRpi=c.rpi!=null?'$'+c.rpi.toFixed(2):'&mdash;',cRoas=c.roas!=null?(c.roas*100).toFixed(2)+'%':'&mdash;';
       var cRoas1=c.roas_d1!=null?(c.roas_d1*100).toFixed(2)+'%':'&mdash;';
@@ -2806,7 +2818,7 @@ function renderMergedTable(){
       h+='<td style="padding-left:30px;text-align:left"><span class="fc-arr" style="font-size:8px">&#9658;</span> <span class="mono">'+cidLink+'</span> '+cst+'</td>';
       h+='<td style="font-size:10px;color:var(--tx3)">'+(c.ad_format||'&mdash;')+'</td>';
       if(!hc['freshness'])h+='<td>'+cFreshCell+'</td>';
-      h+='<td class="mono">'+(c.spend>0?'$'+Math.round(c.spend).toLocaleString():'&mdash;')+'</td>';
+      h+='<td class="mono">'+(moneyOf(c)>0?'$'+Math.round(moneyOf(c)).toLocaleString():'&mdash;')+'</td>';
       h+='<td>'+cBar+'</td>';
       if(!hc['iti'])h+='<td class="mono">'+cIti+'</td>';
       if(!hc['ipm'])h+='<td class="mono">'+cIpm+'</td>';
@@ -2902,7 +2914,7 @@ function toggleG(gi){
 }
 
 /* ─── Creative detail mini chart ─── */
-var _cdetailMetrics={}; // per-CID: {cid: ['spend','rpi']}
+var _cdetailMetrics={}; // per-CID: {cid: ['revenue','rpi']}
 var _tblFilter={states:[],variance:'',cidSearch:'',pipeline:'',adType:''}; // table inline filters
 var _perfFilter=''; // '' | 'top' | 'camp_avg' | 'fmt_avg' | 'poor'
 var _tableSort={col:'spend',dir:'desc'}; // sortable table
@@ -2911,7 +2923,7 @@ function sortCreatives(arr){
   var col=_tableSort.col,dir=_tableSort.dir,mult=dir==='asc'?1:-1,now=new Date();
   return arr.slice().sort(function(a,b){
     var av=0,bv=0;
-    if(col==='spend'){av=a.spend||0;bv=b.spend||0;}
+    if(col==='spend'){av=moneyOf(a);bv=moneyOf(b);}
     else if(col==='roas'){av=a.roas||0;bv=b.roas||0;}
     else if(col==='rpa'){av=a.rpa||9999;bv=b.rpa||9999;mult=-mult;}// lower RPA better
     else if(col==='rpi'){av=a.rpi||9999;bv=b.rpi||9999;mult=-mult;}// lower RPI better
@@ -2920,7 +2932,7 @@ function sortCreatives(arr){
     else if(col==='fresh'){av=a.created_date?Math.floor((now-new Date(a.created_date))/864e5):9999;bv=b.created_date?Math.floor((now-new Date(b.created_date))/864e5):9999;mult=-mult;}// newer = better default
     else if(col==='impressions'){av=a.impressions||0;bv=b.impressions||0;}
     else if(col==='installs'){av=a.installs_cstudio||0;bv=b.installs_cstudio||0;}
-    else{av=a.spend||0;bv=b.spend||0;}
+    else{av=moneyOf(a);bv=moneyOf(b);}
     return (av-bv)*mult;
   });
 }
@@ -2936,7 +2948,7 @@ function thSort(col,lbl){
   return '<th class="sortable-th" data-sortcol="'+col+'" style="cursor:pointer;user-select:none;white-space:nowrap;'+bg+'">'+lbl+'<span style="font-size:8px;opacity:0.7">'+arrow+'</span></th>';
 }
 var CDETAIL_METRICS=[
-  {key:'spend',lbl:'Spend',fmt:function(v){return '$'+Math.round(v).toLocaleString();},fmtShort:function(v){return '$'+Math.round(v);},color:'#555FFF',type:'bar'},
+  {key:'revenue',lbl:'Gross revenue',fmt:function(v){return '$'+Math.round(v).toLocaleString();},fmtShort:function(v){return '$'+Math.round(v);},color:'#555FFF',type:'bar'},
   {key:'rpi',lbl:'RPI',fmt:function(v){return '$'+v.toFixed(2);},fmtShort:function(v){return '$'+v.toFixed(1);},color:'#ED0303',type:'line'},
   {key:'ipm',lbl:'IPM',fmt:function(v){return v.toFixed(2);},fmtShort:function(v){return v.toFixed(2);},color:'#1CAA53',type:'line'},
   {key:'roas_d7',lbl:'D7 ROAS',fmt:function(v){return (v*100).toFixed(1)+'%';},fmtShort:function(v){return (v*100).toFixed(0)+'%';},color:'#0376D9',type:'line'},
@@ -2955,13 +2967,13 @@ function toggleCreativeDetail(subRow){
     detail.classList.add('open');detail.classList.remove('hidden');
     subRow.classList.add('expanded');
     var cid=detail.dataset.cid,fmt=detail.dataset.fmt;
-    if(!_cdetailMetrics[cid])_cdetailMetrics[cid]=['spend','rpi'];
+    if(!_cdetailMetrics[cid])_cdetailMetrics[cid]=['revenue','rpi'];
     renderCreativeDetailChart(detailId,cid,fmt);
   }
 }
 
 function toggleCDetailMetric(detailId,cid,fmt,metric){
-  if(!_cdetailMetrics[cid])_cdetailMetrics[cid]=['spend','rpi'];
+  if(!_cdetailMetrics[cid])_cdetailMetrics[cid]=['revenue','rpi'];
   var arr=_cdetailMetrics[cid],idx=arr.indexOf(metric);
   if(idx>=0){if(arr.length>1)arr.splice(idx,1);}
   else{if(arr.length>=4)arr.shift();arr.push(metric);}
@@ -2970,13 +2982,13 @@ function toggleCDetailMetric(detailId,cid,fmt,metric){
 
 function renderCreativeDetailChart(detailId,cid,fmtKey){
   var el=document.getElementById(detailId+'-chart');if(!el)return;
-  var activeMetrics=_cdetailMetrics[cid]||['spend','rpi'];
+  var activeMetrics=_cdetailMetrics[cid]||['revenue','rpi'];
   // Use per-creative daily data only
   var dailyCr=R.dailyCreativeMetrics||[];
   var points=[];
   dailyCr.forEach(function(r){
     if(String(r.creative_id)!==String(cid))return;
-    points.push({dt:r.dt,spend:r.spend||0,rpi:r.rpi||0,ipm:r.ipm||0,roas_d7:r.roas_d7||0,roas_d1:r.roas_d1||0,rpa:r.rpa||0});
+    points.push({dt:r.dt,revenue:r.revenue||0,rpi:r.rpi||0,ipm:r.ipm||0,roas_d7:r.roas_d7||0,roas_d1:r.roas_d1||0,rpa:r.rpa||0});
   });
   points.sort(function(a,b){return a.dt.localeCompare(b.dt);});
   var fmtDN=invToDN(fmtKey);
@@ -3000,7 +3012,7 @@ function renderCreativeDetailChart(detailId,cid,fmtKey){
     h+='<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px;padding:8px 12px;background:var(--sf);border:1px solid var(--bd);border-radius:8px;align-items:center">';
     h+='<div style="font-size:11px;font-weight:600;color:var(--peri)">CID '+cid+'</div>';
     var statDefs=[
-      {k:'spend',l:'Spend',v:cp.spend!=null?'$'+Math.round(cp.spend).toLocaleString():null},
+      {k:'revenue',l:'Gross revenue',v:moneyOf(cp)>0?'$'+Math.round(moneyOf(cp)).toLocaleString():null},
       {k:'rpi',l:'RPI',v:cp.rpi!=null?'$'+cp.rpi.toFixed(2):null},
       {k:'ipm',l:'IPM',v:cp.ipm!=null?cp.ipm.toFixed(2):null},
       {k:'roas',l:'D7 ROAS',v:cp.roas!=null?(cp.roas*100).toFixed(2)+'%':null},
@@ -3150,7 +3162,7 @@ function exportTable(fmt){
   var isPrimRpa=!!(R&&R._isCpa);
   var hc=_hiddenTableCols;
   // Build headers
-  var headers=['Format','CID','Status','Ad Format','Freshness','Spend','SOW%'];
+  var headers=['Format','CID','Status','Ad Format','Freshness','Gross revenue','SOW%'];
   if(!hc['iti'])headers.push('ITI');
   if(!hc['ipm'])headers.push('IPM');
   if(!hc['rpi'])headers.push('RPI');
@@ -3165,7 +3177,7 @@ function exportTable(fmt){
   var rows=[headers.join(sep)];
   // Campaign row
   var cp=R.campaignPerf||{};
-  var campRow=['Campaign','','','','',cp.spend?Math.round(cp.spend):'',''];
+  var campRow=['Campaign','','','','',moneyOf(cp)>0?Math.round(moneyOf(cp)):'',''];
   if(!hc['iti'])campRow.push(cp.iti!=null?cp.iti.toFixed(6):'');
   if(!hc['ipm'])campRow.push(cp.ipm!=null?cp.ipm.toFixed(2):'');
   if(!hc['rpi'])campRow.push(cp.rpi!=null?cp.rpi.toFixed(2):'');
@@ -3182,14 +3194,14 @@ function exportTable(fmt){
   if(_tblFilter.states.length>0)perfs=perfs.filter(function(c){return _tblFilter.states.indexOf(c.status)>=0;});
   if(_tblFilter.variance)perfs=perfs.filter(function(c){return c.variance===_tblFilter.variance;});
   if(_tblFilter.cidSearch)perfs=perfs.filter(function(c){return String(c.creative_id).indexOf(_tblFilter.cidSearch)>=0;});
-  var gSpend=perfs.reduce(function(s,c){return s+(c.spend||0);},0)||1;
-  perfs.sort(function(a,b){return (b.spend||0)-(a.spend||0);});
+  var gSpend=perfs.reduce(function(s,c){return s+moneyOf(c);},0)||1;
+  perfs.sort(function(a,b){return moneyOf(b)-moneyOf(a);});
   perfs.forEach(function(c){
     var dn=c.mco_group||invToDN(c.competing_group);
-    var sow=((c.spend||0)/gSpend*100).toFixed(1);
+    var sow=(moneyOf(c)/gSpend*100).toFixed(1);
     var fresh=c.created_date?Math.floor((new Date()-new Date(c.created_date))/864e5)+'d':'';
     var varLabel=c.variance==='high'?'Low var':c.variance==='moderate'?'Med var':c.variance==='low'?'High var':'';
-    var row=[dn,c.creative_id,c.status,c.ad_format||'',fresh,Math.round(c.spend||0),sow];
+    var row=[dn,c.creative_id,c.status,c.ad_format||'',fresh,Math.round(moneyOf(c)),sow];
     if(!hc['iti'])row.push(c.iti!=null?c.iti.toFixed(6):'');
     if(!hc['ipm'])row.push(c.ipm!=null?c.ipm.toFixed(2):'');
     if(!hc['rpi'])row.push(c.rpi!=null?c.rpi.toFixed(2):'');

@@ -74,7 +74,8 @@ var MCO_RULES = {
 
   // Auto-Pauser lose criteria (MCO campaigns only) — ALL must hold
   auto_pauser: {
-    spend_share_pct: 5,               // < this share of the competing inventory group's spend
+    spend_share_pct: 5,               // < this share of the competing inventory group's GROSS REVENUE
+    spend_share_basis: 'gross revenue (revenue_micros_d7) — what the advertiser pays, not media cost',
     spend_share_window_days: 3,
     selection_prob_pct: 10            // ...or selection probability below this
   },
@@ -1446,6 +1447,7 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters, o
           dt: String(r.dt).substring(0, 10),
           creative_id: String(r.creative_id),
           spend: parseFloat(r.spend) || 0,
+          revenue: parseFloat(r.revenue) || 0,
           rpi: pf(r.rpi),
           ipm: pf(r.ipm),
           roas_d7: pf(r.roas_d7),
@@ -2363,6 +2365,7 @@ function buildDailyCreativeMetricsSQL(campaignId, lookbackDays) {
     "  CAST(from_iso8601_timestamp(r.dt) AS DATE) AS dt,",
     "  r.creative_id,",
     "  COALESCE(SUM(r.spend_micros / CAST(1e6 AS DOUBLE)), 0) AS spend,",
+    "  COALESCE(SUM(r.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) AS revenue,",
     "  COALESCE(SUM(r.revenue_micros_d1 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(SUM(r.installs_d1), 0) AS rpi,",
     "  CAST(COALESCE(SUM(r.installs_d1), 0) AS DOUBLE) / NULLIF(SUM(r.impressions), 0) * 1000 AS ipm,",
     "  COALESCE(SUM(r.coalesced_customer_revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0) / NULLIF(COALESCE(SUM(r.revenue_micros_d7 / CAST(1e6 AS DOUBLE)), 0), 0) AS roas_d7,",
@@ -3581,10 +3584,14 @@ function analyzeCreativePerformance(perfData, statusLog, campaignConfig, lookbac
   perfData.forEach(function(r) {
     r._status = _normalizeStatus(r.status);
     r._spend = parseFloat(r.spend) || 0;
+    r._revenue = parseFloat(r.revenue) || 0;
     r._roas = parseFloat(r.roas);
     r._rpa = parseFloat(r.rpa);
     r._rpi = parseFloat(r.rpi);
-    r._sow = parseFloat(r.sow_pct) || (totalSpend > 0 ? (r._spend / totalSpend * 100) : 0);
+    // SHARE OF GROSS REVENUE, not of media spend. In MCO terms "spend share" — including the
+    // Auto-Pauser's 5% threshold — means the share of what the advertiser pays, which is
+    // revenue_micros_d7. Measuring it on spend_micros made the number answer a question nobody asked.
+    r._sow = parseFloat(r.sow_pct) || (totalRevenue > 0 ? (r._revenue / totalRevenue * 100) : 0);
     r._sow = Math.round(r._sow * 10) / 10;
     r._variance = (r.variance || '').toString().toLowerCase();
   });
@@ -3615,6 +3622,7 @@ function analyzeCreativePerformance(perfData, statusLog, campaignConfig, lookbac
   var formatBreakdown = _groupBy(perfData, 'ad_format', function(rows) {
     return {
       spend: _sum(rows, '_spend'),
+      revenue: _sum(rows, '_revenue'),
       count: rows.length,
       activeCount: rows.filter(function(r) { return r._status === 'active'; }).length,
     };
@@ -3624,6 +3632,7 @@ function analyzeCreativePerformance(perfData, statusLog, campaignConfig, lookbac
     var active = rows.filter(function(r) { return r._status === 'active'; });
     return {
       spend: _sum(rows, '_spend'),
+      revenue: _sum(rows, '_revenue'),
       count: rows.length,
       activeCount: active.length,
       healthy: active.length >= THRESHOLDS.MIN_CREATIVES_PER_GROUP,
