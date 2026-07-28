@@ -519,7 +519,13 @@ function runSQLParallel(sqlMap, failedOut) {
   // pushed onto it. Without this a failure is indistinguishable from "no data" — the callers that
   // don't pass it keep the old degrade-to-[] behaviour, but anything summing several queries into
   // one number MUST pass it, or a failed part silently understates the total.
+  //
+  // failedOut.reasons[key] carries WHY, so an error message can name the cause instead of only the
+  // symptom. Hung off the array itself (arrays are objects) to keep the callers' .length/.forEach
+  // untouched.
   failedOut = failedOut || [];
+  failedOut.reasons = failedOut.reasons || {};
+  var fail = function(key, why) { failedOut.push(key); failedOut.reasons[key] = why; };
   var token = getAccessToken();
   var BASE = LOOKER_CONFIG.BASE_URL + '/api/4.0';
   var authHeader = { 'Authorization': 'Bearer ' + token };
@@ -537,8 +543,8 @@ function runSQLParallel(sqlMap, failedOut) {
       });
       var q = JSON.parse(r.getContentText());
       if (q.slug) slugs[key] = q.slug;
-      else { failedOut.push(key); Logger.log('Slug creation failed for ' + key + ': ' + r.getContentText().substring(0,100)); }
-    } catch(e) { failedOut.push(key); Logger.log('Slug error for ' + key + ': ' + e.message); }
+      else { fail(key, 'could not be prepared: ' + r.getContentText().substring(0,120)); }
+    } catch(e) { fail(key, 'could not be prepared: ' + e.message); }
   });
 
   // Step 2: Fire all run/json requests in parallel
@@ -560,8 +566,8 @@ function runSQLParallel(sqlMap, failedOut) {
     try {
       var body = responses[i].getContentText();
       if (responses[i].getResponseCode() !== 200) {
-        Logger.log('Parallel query ' + key + ' HTTP ' + responses[i].getResponseCode());
-        failedOut.push(key);
+        Logger.log('Parallel query ' + key + ' HTTP ' + responses[i].getResponseCode() + ': ' + body.substring(0,200));
+        fail(key, 'HTTP ' + responses[i].getResponseCode());
         results[key] = [];
       } else {
         var parsed = JSON.parse(body);
@@ -571,7 +577,7 @@ function runSQLParallel(sqlMap, failedOut) {
         var errText = lookerErrorIn_(parsed);
         if (errText) {
           Logger.log('Parallel query ' + key + ' returned a Looker error: ' + errText.substring(0,200));
-          failedOut.push(key);
+          fail(key, errText.substring(0,160));
           results[key] = [];
         } else {
           results[key] = parsed;
@@ -579,7 +585,7 @@ function runSQLParallel(sqlMap, failedOut) {
       }
     } catch(e) {
       Logger.log('Parallel parse error for ' + key + ': ' + e.message);
-      failedOut.push(key);
+      fail(key, 'unreadable response: ' + e.message);
       results[key] = [];
     }
   });
@@ -1984,31 +1990,45 @@ function fetchCreativePerf_(campaignId, lookbackDays) {
       failed = [];
       rows = (runSQLParallel({ perf: sql }, failed).perf) || [];
     }
-    return { rows: rows, failed: failed.length ? ['the whole window'] : [], chunks: 1 };
+    return {
+      rows: rows, chunks: 1,
+      failed: failed.length ? ['the whole window (' + (failed.reasons.perf || 'unknown') + ')'] : []
+    };
   }
 
-  var sqls = {}, labels = {};
-  wins.forEach(function(w, i) {
-    var k = 'perf' + i;
-    sqls[k] = buildCreativeLevelPerfSQL(campaignId, lookbackDays, w);
-    labels[k] = 'day ' + w.from + '-' + w.to + ' of ' + lookbackDays;
+  // ONE CHUNK PER REQUEST, SEQUENTIALLY. Firing them together through fetchAll is what failed on
+  // 73853: chunk 0 came back and chunks 1 and 2 did not, twice over. It is not Trino contention —
+  // all three answer in 14-19s when run from outside Apps Script, both one after another AND all
+  // three at once (19.4s wall). Something about several slow requests inside one fetchAll is what
+  // breaks, so give each request the condition that measures good: alone. Costs wall clock —
+  // ~3x19s instead of ~19s — and buys a read that actually completes.
+  var parts = [], failed = [], reasons = {};
+  wins.forEach(function(w) {
+    var label = 'day ' + w.from + '-' + w.to + ' of ' + lookbackDays;
+    var sql = buildCreativeLevelPerfSQL(campaignId, lookbackDays, w);
+    var t = new Date().getTime();
+    var f1 = [], rows = (runSQLParallel({ perf: sql }, f1).perf) || [];
+    if (f1.length) {
+      Logger.log('Perf chunk ' + label + ' failed (' + (f1.reasons.perf || '?') + ') — retrying');
+      var f2 = [];
+      rows = (runSQLParallel({ perf: sql }, f2).perf) || [];
+      if (f2.length) {
+        failed.push(label);
+        reasons[label] = f2.reasons.perf || 'unknown';
+        return;
+      }
+    }
+    Logger.log('Perf chunk ' + label + ': ' + rows.length + ' rows in ' +
+               Math.round((new Date().getTime() - t) / 1000) + 's');
+    parts.push(rows);
   });
-  var failed = [];
-  var res = runSQLParallel(sqls, failed);
-  if (failed.length) {
-    // Retry only the pieces that failed; the ones that came back are already paid for.
-    Logger.log('Perf chunks failed: ' + failed.join(', ') + ' — retrying just those');
-    var retry = {}, failed2 = [];
-    failed.forEach(function(k) { retry[k] = sqls[k]; });
-    var again = runSQLParallel(retry, failed2);
-    Object.keys(again).forEach(function(k) { res[k] = again[k]; });
-    failed = failed2;
-  }
-  var parts = Object.keys(sqls).map(function(k) { return res[k] || []; });
-  var rows = combinePerfChunks_(parts);
-  Logger.log('Perf: ' + wins.length + ' chunks -> ' + rows.length + ' creatives' +
+  var out = combinePerfChunks_(parts);
+  Logger.log('Perf: ' + wins.length + ' chunks -> ' + out.length + ' creatives' +
              (failed.length ? ' (MISSING ' + failed.length + ')' : ''));
-  return { rows: rows, failed: failed.map(function(k) { return labels[k]; }), chunks: wins.length };
+  return {
+    rows: out, chunks: wins.length,
+    failed: failed.map(function(l) { return l + ' (' + reasons[l] + ')'; })
+  };
 }
 
 /**
