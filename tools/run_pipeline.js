@@ -82,7 +82,8 @@ console.log('  totalSpend        ', n(r.totalSpend));
 console.log('  totalCreatives    ', n(r.totalCreatives), ' activeCreatives', n(r.activeCreatives));
 console.log('  primaryMetric     ', n(r.primaryMetric), ' _isCpa', n(r._isCpa));
 console.log('  avgMetric         ', n(r.avgMetric), ' kpiTarget', n(r.kpiTarget));
-console.log('  campaignPerf      ', 'spend=' + n(cp.spend), 'revenue=' + n(cp.revenue),
+// revenue_d7 is the field name, and it is what the "Gross revenue" KPI tile reads.
+console.log('  campaignPerf      ', 'spend=' + n(cp.spend), 'grossRevenue=' + n(cp.revenue_d7),
             'roas_d7=' + n(cp.roas_d7), 'rpi=' + n(cp.rpi), 'rpa=' + n(cp.rpa));
 console.log('  creativePerf rows ', (r.creativePerf || []).length,
             ' formatMetrics', (r.formatMetrics || []).length,

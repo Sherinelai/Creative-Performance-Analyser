@@ -343,7 +343,7 @@ header{padding-bottom:18px;border-bottom:1.5px solid var(--bd);margin-bottom:18p
         <div style="height:10px;width:40px;background:var(--bone);border-radius:4px"></div>
       </div>
       <div style="background:var(--sf);border:1.5px solid var(--bd);border-radius:12px;padding:12px 20px;min-width:150px;text-align:left;box-shadow:var(--shadow);opacity:0.5">
-        <div style="font-size:9px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Spend</div>
+        <div style="font-size:9px;font-weight:600;color:var(--tx3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Gross revenue</div>
         <div style="height:20px;width:70px;background:var(--bone);border-radius:4px;margin-bottom:4px"></div>
         <div style="height:10px;width:45px;background:var(--bone);border-radius:4px"></div>
       </div>
@@ -988,7 +988,17 @@ function renderDashboard(){
   // Prefer campaign-level SQL values (same source as the Campaign row in the table)
   // so KPI numbers always match the table. Fallback to creative-level sums.
   var _cpk=R.campaignPerf||null;
+  // GROSS REVENUE is the headline money figure, not spend. `spend` is media cost; `revenue_micros_d7`
+  // is what the advertiser pays, and it is the basis every other metric on this row already uses —
+  // verified on campaign 78841: spend $55,927.50 vs gross revenue $92,972.86, and RPA 607.67 x 153
+  // events = RPI 10.93 x 8,504 installs = $92,972.86 exactly. The spend tile was the only figure on
+  // the row measured against a different base. Spend stays visible in the sub-line: it is what SOW
+  // and the format spend share are computed from.
+  var kpiRevenue=(_cpk&&_cpk.revenue_d7!=null)?Math.round(_cpk.revenue_d7)
+                 :(R.totalRevenue!=null?Math.round(R.totalRevenue):null);
   var kpiSpend=(_cpk&&_cpk.spend!=null)?Math.round(_cpk.spend):R.totalSpend;
+  var kpiRevenueSub=getDateRange(R.lookbackDays||30).label+
+    (kpiSpend>0?' · $'+kpiSpend.toLocaleString()+' spend':'');
   var kpiMetricLabel='Avg '+ml, kpiMetricVal=avgMetricDisplay, kpiMetricSub=R.kpiTarget?'KPI: '+R.kpiTarget:'';
   if(_cpk){
     if(R._isCpa&&_cpk.rpa!=null){kpiMetricLabel='Campaign RPA';kpiMetricVal='$'+_cpk.rpa.toFixed(2);kpiMetricSub=(R.kpiTarget?'KPI: '+R.kpiTarget+' · ':'')+'spend-weighted';}
@@ -1018,7 +1028,7 @@ function renderDashboard(){
   // different and wrong claim, and it made the summary look like it had lost its data.
   var pendingVal='<span style="color:var(--tx3);font-size:0.62em;font-weight:500">querying&hellip;</span>';
   document.getElementById('kpiRow').innerHTML=
-    kpi('Total spend',R.partial?pendingVal:(kpiSpend>0?'$'+kpiSpend.toLocaleString():'&mdash;'),getDateRange(R.lookbackDays||30).label,'')+
+    kpi('Gross revenue',R.partial?pendingVal:(kpiRevenue>0?'$'+kpiRevenue.toLocaleString():'&mdash;'),R.partial?getDateRange(R.lookbackDays||30).label:kpiRevenueSub,'')+
     kpi(kpiMetricLabel,R.partial?pendingVal:kpiMetricVal,R.partial?'still loading':kpiMetricSub,'')+
     kpi('Active creatives',activeCount,'of '+totalCount,'var(--gn)')+
     kpi('Paused creatives',pausedCount,pausedSub,'var(--rd)')+

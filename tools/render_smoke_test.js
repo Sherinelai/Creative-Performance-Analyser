@@ -104,6 +104,12 @@ const REQUIRED = [
   ['panel-overview', 2000],
 ];
 function assertRendered(label) {
+  // The headline money figure is gross revenue, not spend — a regression here is silent, because
+  // both are plausible dollar amounts (78841: $92,972.86 vs $55,927.50).
+  const kpi = (elements.get('kpiRow') || { innerHTML: '' }).innerHTML;
+  if (kpi && kpi.indexOf('Gross revenue') < 0) {
+    throw new Error('KPI row lost its Gross revenue tile (' + label + ')');
+  }
   const thin = REQUIRED
     .map(([id, min]) => [id, min, (elements.get(id) || { innerHTML: '' }).innerHTML.length])
     .filter(([, min, len]) => len < min);
