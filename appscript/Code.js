@@ -1518,12 +1518,23 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters, o
       // is_metricless marks them so the UI renders '—' rather than a misleading 0.
       // They cannot be classified (perf_class needs variance, which needs a confidence
       // interval), and they are excluded from metric averages by the null checks already in
-      // place. Only the queue is patched this way — exploring/optimizing creatives are being
-      // served, so they are already in creativePerf.
+      // place.
+      //
+      // ALL THREE STATES, not just the queue. "exploring/optimizing creatives are being served, so
+      // they are already in creativePerf" was wrong: the perf window excludes the last
+      // DATA_BAKE_DAYS days, so a creative that only started serving inside the bake window has no
+      // row in it whatever its state. Campaign 16298 measured 22 of 26 exploring, 6 of 112
+      // optimizing and 14 of 20 queuing creatives missing from the table — 42 creatives in a known
+      // pipeline state that the creative list simply did not mention.
       var present = {};
       (result.creativePerf || []).forEach(function(cp) { present[String(cp.creative_id)] = true; });
       var added = 0;
-      (b2.queuing || []).forEach(function(r) {
+      var stateRows = [];
+      ['queuing', 'exploring', 'optimizing'].forEach(function(st) {
+        (b2[st] || []).forEach(function(r) { stateRows.push({ row: r, state: st }); });
+      });
+      stateRows.forEach(function(entry) {
+        var r = entry.row;
         var cid = r.creative_id;
         if (cid == null || String(cid) === '1' || present[String(cid)]) return;
         var fmt = r.inventory_format || null;
@@ -1535,8 +1546,8 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters, o
           mco_group: toMcoGroup(fmt || ''),
           status: normState(r.creative_state),
           created_date: r.created_at || null,
-          lifecycle_state: 'queuing',
-          is_queuing: true,
+          lifecycle_state: entry.state,
+          is_queuing: entry.state === 'queuing',
           is_metricless: true,          // never served — no analytics row exists
           spend: 0, revenue: 0,
           roas: null, roas_d1: null, rpa: null, rpi: null, iti: null, ipm: null,
@@ -2017,7 +2028,7 @@ function fetchCreativePerf_(campaignId, lookbackDays) {
       rows = (runSQLParallel({ perf: sql }, failed).perf) || [];
     }
     return {
-      rows: rows, chunks: 1,
+      rows: combinePerfChunks_([rows]), chunks: 1,
       failed: failed.length ? ['the whole window (' + (failed.reasons.perf || 'unknown') + ')'] : []
     };
   }
@@ -2158,14 +2169,19 @@ function buildCreativeLevelPerfSQL(campaignId, lookbackDays, win) {
   var MIDNIGHT = "CAST(CAST(DATE_TRUNC('DAY', CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP)";
   var dtStart = "DATE_ADD('day', -" + (lookbackDays + DATA_BAKE_DAYS) + ", CAST(CAST(DATE_TRUNC('DAY', CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP))";
   var dtEnd   = "DATE_ADD('day', " + lookbackDays + ", DATE_ADD('day', -" + (lookbackDays + DATA_BAKE_DAYS) + ", CAST(CAST(DATE_TRUNC('DAY', CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP)))";
-  var sumCols = '';
+  // The raw sums are selected ALWAYS, not only when chunking, because combinePerfChunks_ is how
+   // both paths get one row per creative. The 17-column GROUP BY emits a creative more than once
+   // whenever a campaign-level column changes mid-window, and those extra rows used to be DROPPED
+   // rather than summed: campaign 16298 showed $1,000,470 in the KPI tile (which summed pre-dedup)
+   // against $999,134 in the table (post-dedup) — $1,336 of gross revenue that existed in neither
+   // place consistently.
+  var sumCols = ',\n' + Object.keys(PERF_SUM_COLUMNS).map(function(k) {
+    return "  COALESCE(SUM(revenue_summary." + PERF_SUM_COLUMNS[k] + "), 0) AS " + k;
+  }).join(',\n');
   if (win) {
     var base = -(lookbackDays + DATA_BAKE_DAYS);
     dtStart = "DATE_ADD('day', " + (base + win.from) + ", " + MIDNIGHT + ")";
     dtEnd   = "DATE_ADD('day', " + (base + win.to)   + ", " + MIDNIGHT + ")";
-    sumCols = ',\n' + Object.keys(PERF_SUM_COLUMNS).map(function(k) {
-      return "  COALESCE(SUM(revenue_summary." + PERF_SUM_COLUMNS[k] + "), 0) AS " + k;
-    }).join(',\n');
   }
   return [
     "WITH pinpoint__creatives_simple AS (",
