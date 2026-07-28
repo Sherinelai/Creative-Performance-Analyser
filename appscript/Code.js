@@ -3692,7 +3692,11 @@ function analyzeCreativePerformance(perfData, statusLog, campaignConfig, lookbac
       competing_group: r.competing_group,
       status: r._status,
       spend: r._spend,
-      roas: isNaN(r._roas) ? null : Math.round(r._roas * 100) / 100,
+      // ROAS is a FRACTION here (~0.03 = 3%), so rounding it to 2 decimals threw away most of the
+      // number: campaign 41535 had a creative at 0.00196 stored as 0, and every client-side
+      // revenue-weighted ROAS came out 0.029729 instead of 0.030727. Keep the precision and let the
+      // display round — 6 decimals is 4 significant figures on a 0.03% ROAS.
+      roas: isNaN(r._roas) ? null : Math.round(r._roas * 1e6) / 1e6,
       rpa: isNaN(r._rpa) ? null : Math.round(r._rpa * 100) / 100,
       rpi: isNaN(r._rpi) ? null : Math.round(r._rpi * 1000) / 1000,
       sow: r._sow,

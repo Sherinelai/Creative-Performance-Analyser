@@ -1487,8 +1487,10 @@ function requestAiInsights(){
     var f=fmSummary[dn];var _rev=moneyOf(c);f.revenue+=_rev;f.count++;
     if(c.roas!=null&&_rev>0){f.custRevS+=c.roas*_rev;f.revS+=_rev;}
     if(c.rpi!=null&&c.installs>0){f.rev1S+=c.rpi*c.installs;f.inst1S+=c.installs;}
-    if(c.rpa!=null&&c.target_events_d7>0){f.rpaRevS+=c.rpa*c.target_events_d7;f.evtS+=c.target_events_d7;}
-    else if(c.rpa!=null&&_rev>0){f.rpaRevS+=_rev;f.evtS+=_rev/c.rpa;}
+    // RPA is the ratio of sums over EVERY row: the query nulls a creative's own rpa below 5
+    // target events, but its gross revenue and its events still belong in the total. Dropping
+    // them gave every aggregate $586.19 where the campaign figure was $609.85 on 41535.
+    f.rpaRevS+=_rev;f.evtS+=(c.target_events_d7||0);
   });
   var fmForAI=Object.values(fmSummary).map(function(f){return{format:f.format,gross_revenue:Math.round(f.revenue),roas_d7:f.revS>0?+(f.custRevS/f.revS).toFixed(4):null,rpi:f.inst1S>0?+(f.rev1S/f.inst1S).toFixed(2):null,rpa:f.evtS>0?+(f.rpaRevS/f.evtS).toFixed(2):null,count:f.count};}).sort(function(a,b){return b.gross_revenue-a.gross_revenue;});
   var trendPayload={
@@ -1691,8 +1693,7 @@ function localFormatSummary(){
     if(c.status==='active')f.active++;else f.paused++;
     if(c.roas!=null&&_r>0){f.custRevS+=c.roas*_r;f.revS+=_r;f.roasN++;}
     if(c.rpi!=null&&c.installs>0){f.rev1S+=c.rpi*c.installs;f.inst1S+=c.installs;f.rpiN++;}
-    if(c.rpa!=null&&c.target_events_d7>0){f.rpaRevS+=c.rpa*c.target_events_d7;f.evtS+=c.target_events_d7;f.rpaN++;}
-    else if(c.rpa!=null&&_r>0){f.rpaRevS+=_r;f.evtS+=_r/c.rpa;f.rpaN++;}
+    f.rpaRevS+=_r;f.evtS+=(c.target_events_d7||0);if(c.rpa!=null)f.rpaN++;
     if(c.iti!=null&&c.impressions>0){f.instD7S+=c.iti*c.impressions;f.impS+=c.impressions;f.itiN++;}
     else if(c.iti!=null){f.instD7S+=c.iti;f.impS+=1;f.itiN++;} // no impression data — treat as single sample
   });
@@ -1964,9 +1965,8 @@ function renderSpendInner(){
     var g=perfByGroup[lbl];var rev=moneyOf(c);var wR=rev;
     if(c.rpi!=null){g.sRpiS+=c.rpi;g.sRpiN++;if(c.installs>0){g.rev1S+=c.rpi*c.installs;g.inst1S+=c.installs;}}
     if(c.roas!=null){g.sRoasS+=c.roas;g.sRoasN++;if(wR>0){g.custRevS+=c.roas*wR;g.revS+=wR;}}
-    if(c.rpa!=null){g.sRpaS+=c.rpa;g.sRpaN++;
-      if(c.target_events_d7>0){g.rpaRevS+=c.rpa*c.target_events_d7;g.evtS+=c.target_events_d7;}
-      else if(rev>0){g.rpaRevS+=rev;g.evtS+=rev/c.rpa;}}
+    if(c.rpa!=null){g.sRpaS+=c.rpa;g.sRpaN++;}
+    g.rpaRevS+=rev;g.evtS+=(c.target_events_d7||0);
   });
   ser.forEach(function(s){
     var g=perfByGroup[s.label]||{};
@@ -2189,9 +2189,8 @@ function aggregateBreakdown(){
     m.money+=rev;m.rev+=rev;m.count++;
     if(c.rpi!=null){m.sRpiS+=c.rpi;m.sRpiN++;if(c.installs>0){m.rev1S+=c.rpi*c.installs;m.inst1S+=c.installs;}}
     if(c.roas!=null){m.sRoasS+=c.roas;m.sRoasN++;if(wR>0){m.custRevS+=c.roas*wR;m.revS+=wR;}}
-    if(c.rpa!=null){m.sRpaS+=c.rpa;m.sRpaN++;
-      if(c.target_events_d7>0){m.rpaRevS+=c.rpa*c.target_events_d7;m.evtS+=c.target_events_d7;}
-      else if(rev>0){m.rpaRevS+=rev;m.evtS+=rev/c.rpa;}}
+    if(c.rpa!=null){m.sRpaS+=c.rpa;m.sRpaN++;}
+    m.rpaRevS+=rev;m.evtS+=(c.target_events_d7||0);
     if(c.iti!=null){m.sItiS+=c.iti;m.sItiN++;if(c.impressions>0){m.instD7S+=c.iti*c.impressions;m.impS+=c.impressions;}}
   }
   perfs.forEach(function(c){
@@ -2693,9 +2692,8 @@ function renderMergedTable(){
       if(c.roas!=null){sRoasS+=c.roas;sRoasN++;if(wR>0){custRevS+=c.roas*wR;revS+=wR;roasN++;}}
       if(c.rpi!=null){sRpiS+=c.rpi;sRpiN++;if(c.installs>0){rev1S+=c.rpi*c.installs;inst1S+=c.installs;rpiN++;}}
       if(c.roas_d1!=null){sRoas1S+=c.roas_d1;sRoas1N++;if(wR>0){roas1NumS+=c.roas_d1*wR;roas1DenS+=wR;roas1N++;}}
-      if(c.rpa!=null){sRpaS+=c.rpa;sRpaN++;
-        if(c.target_events_d7>0){rpaRevS+=c.rpa*c.target_events_d7;evtS+=c.target_events_d7;rpaN++;}
-        else if(rev>0){rpaRevS+=rev;evtS+=rev/c.rpa;rpaN++;}}
+      if(c.rpa!=null){sRpaS+=c.rpa;sRpaN++;rpaN++;}
+      rpaRevS+=rev;evtS+=(c.target_events_d7||0);
       instS+=(c.installs||0);
       if(c.iti!=null){sItiS+=c.iti;sItiN++;if(c.impressions>0){instD7S+=c.iti*c.impressions;impS+=c.impressions;itiN++;ipmN++;}}
       (c.flags||[]).forEach(function(f){fc[f]=(fc[f]||0)+1;});
