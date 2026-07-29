@@ -1245,7 +1245,10 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters, o
     }
 
     Logger.log('Step 6: Analysis...');
-    var config = { campaign_type: campaignType, mco_enabled: mcoEnabled, kpi_target: null, app_id: appId, app_name: appName };
+    // optimization_state reaches the analysis so its primary-metric resolution can use it — the
+    // campaign type alone is the weakest of the three signals and the last resort.
+    var config = { campaign_type: campaignType, mco_enabled: mcoEnabled, kpi_target: null,
+                   app_id: appId, app_name: appName, optimization_state: optState };
     var result = analyzeCreativePerformance(merged, statusLog, config, lookbackDays);
 
     // analyzeCreativePerformance answers an empty creative set with {error} and nothing else, and
@@ -1467,9 +1470,18 @@ function fetchCreativeData(searchInput, searchType, lookbackDays, dashFilters, o
         (rows||[]).forEach(function(r) { if (r.creative_id && String(r.creative_id) !== '1') s[String(r.creative_id)] = true; });
         return s;
       }
+      // The three states are mutually exclusive BY DEFINITION but not in the PDT's rows: the queue
+      // table can carry several rows per creative, so the same creative comes back as both
+      // current_status='excluded' (queuing) and 'included' (exploring). Campaign 80450 measured 30
+      // creatives in both, and 51+72+2 = 125 "states" for 94 creatives — the double count the
+      // three-state definition was supposed to end, one level lower down than where it was fixed.
+      // Resolve it once, here, with the precedence the definitions imply: is_currently_optimizing is
+      // the strongest signal, and a creative served in ANY slot is exploring rather than waiting.
       var queuingSet   = buildCidSet(b2.queuing);
       var exploringSet = buildCidSet(b2.exploring);
       var optimizingSet= buildCidSet(b2.optimizing);
+      Object.keys(optimizingSet).forEach(function(cid){ delete exploringSet[cid]; delete queuingSet[cid]; });
+      Object.keys(exploringSet).forEach(function(cid){ delete queuingSet[cid]; });
       Logger.log('Lifecycle sets — queuing:' + Object.keys(queuingSet).length + ' exploring:' + Object.keys(exploringSet).length + ' optimizing:' + Object.keys(optimizingSet).length);
       if (result.creativePerf) {
         result.creativePerf.forEach(function(cp) {
@@ -3615,15 +3627,29 @@ function analyzeCreativePerformance(perfData, statusLog, campaignConfig, lookbac
   var activeCreatives = perfData.filter(function(r) { return r._status === 'active'; });
   var activeCount = _unique(activeCreatives, 'creative_id').length;
 
-  var primaryMetric = _getPrimaryMetric(campType);
+  // The metric the campaign is judged on is decided ONCE, by resolvePrimaryMetric_ (goals and
+  // optimization_state first, campaign type last). Deriving it again from campType alone put a
+  // spend-weighted ROAS of 0.14 under an "Avg RPA" heading on campaign 80450, whose optimization
+  // state is explore-cpa/cpa and which has no target events at all in the window.
+  var primaryMetric = campaignConfig.primary_metric ||
+                      resolvePrimaryMetric_(campType, campaignConfig.optimization_state, perfData);
   var metricKey = '_' + primaryMetric;
   var isLowerBetter = (campType === 'ua_cpa');
 
   var validMetrics = perfData.filter(function(r) { return !isNaN(r[metricKey]) && r[metricKey] !== null; });
   // Spend-weighted average (ratio-of-sums) so it aligns with the campaign-level SQL:
   // For ROAS: Σ(roas_i × rev_i)/Σrev_i ≈ Σcust_rev/Σrev. Weight = revenue (GR); fallback to simple average.
-  var avgMetric = 0;
-  if (validMetrics.length > 0) {
+  // null, not 0, when there is nothing to average: campaign 80450 has no target events at all in
+  // the window, so its RPA is UNKNOWN. A 0 there reads as "$0.00 per action", which is a claim.
+  var avgMetric = null;
+  // RPA is Sigma gross revenue / Sigma target events — the ratio of sums, the same figure
+  // campaignPerf reports. Weighting each creative's own rpa by its revenue instead gave $24.73
+  // against the campaign's $21.61 on campaign 32613: two campaign averages of one metric, 14%
+  // apart, with the wrong one driving the below_avg / above_avg flags and the recommendations.
+  if (primaryMetric === 'rpa') {
+    var totEvt = _sum(perfData, 'target_events_d7');
+    avgMetric = totEvt > 0 ? totalRevenue / totEvt : null;
+  } else if (validMetrics.length > 0) {
     var wNum = 0, wDen = 0;
     validMetrics.forEach(function(r) {
       var w = (r._revenue != null ? r._revenue : (r.revenue != null ? r.revenue : null));
@@ -3690,12 +3716,12 @@ function analyzeCreativePerformance(perfData, statusLog, campaignConfig, lookbac
     if (!isNaN(metricVal) && metricVal !== null) {
       if (campType === 'ua_cpr' || campType === 're') {
         if (kpiTarget && metricVal < kpiTarget) flags.push('below_kpi');
-        if (metricVal < avgMetric * THRESHOLDS.UNDERPERFORM_THRESHOLD) flags.push('below_avg');
+        if (avgMetric != null && metricVal < avgMetric * THRESHOLDS.UNDERPERFORM_THRESHOLD) flags.push('below_avg');
       } else if (campType === 'ua_cpa') {
         if (kpiTarget && metricVal > kpiTarget) flags.push('above_kpi');
-        if (metricVal > avgMetric * THRESHOLDS.OVERPERFORM_THRESHOLD) flags.push('above_avg');
+        if (avgMetric != null && metricVal > avgMetric * THRESHOLDS.OVERPERFORM_THRESHOLD) flags.push('above_avg');
       } else {
-        if (metricVal > avgMetric * THRESHOLDS.OVERPERFORM_THRESHOLD) flags.push('high_rpi');
+        if (avgMetric != null && metricVal > avgMetric * THRESHOLDS.OVERPERFORM_THRESHOLD) flags.push('high_rpi');
       }
     }
 
@@ -3776,7 +3802,7 @@ function analyzeCreativePerformance(perfData, statusLog, campaignConfig, lookbac
     totalRevenue: Math.round(totalRevenue),
     totalCreatives: totalCreatives,
     activeCreatives: activeCount,
-    avgMetric: Math.round(avgMetric * 100) / 100,
+    avgMetric: avgMetric == null ? null : Math.round(avgMetric * 100) / 100,
     formatBreakdown: formatBreakdown,
     groupBreakdown: groupBreakdown,
     coverage: coverage,
