@@ -582,6 +582,16 @@ function runSQLParallel(sqlMap, failedOut) {
           results[key] = [];
         } else {
           results[key] = parsed;
+          // A query that comes back with EXACTLY its own LIMIT has almost certainly been cut off.
+          // inventory returned 500 of 1,098 rows on campaign 16298 and said nothing — and it orders
+          // by creative_id, so the 500 it kept were the oldest, not the biggest. Never silent again.
+          var lim = /LIMIT\s+(\d+)\s*$/i.exec(String(sqlMap[key]).trim());
+          if (lim && Array.isArray(parsed) && parsed.length === parseInt(lim[1], 10)) {
+            failedOut.truncated = failedOut.truncated || [];
+            failedOut.truncated.push(key);
+            Logger.log('TRUNCATED: query ' + key + ' returned exactly its LIMIT of ' + lim[1] +
+                       ' rows — raise it or the numbers below cover only part of the campaign');
+          }
         }
       }
     } catch(e) {
@@ -2254,7 +2264,10 @@ function buildCreativeLevelPerfSQL(campaignId, lookbackDays, win) {
     "  AND revenue_summary.is_uncredited <> 'true'",
     "GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17",
     "ORDER BY 18 DESC",
-    "LIMIT 500",
+    // 5000, not 500: this is the money query, and when the window is CHUNKED each piece
+    // carries its own limit, so a truncated chunk is revenue that silently vanishes from
+    // the totals rather than a merely incomplete list.
+    "LIMIT 5000",
   ].join('\n');
 }
 
@@ -2307,7 +2320,7 @@ function buildCreativeInventorySQL(campaignId) {
     "  AND (cstudio_daily_analytics_v1.campaign_type<>'reengagement' OR cstudio_daily_analytics_v1.campaign_type IS NULL)",
     "  AND (from_iso8601_timestamp(cstudio_daily_analytics_v1.dt))>=DATE_ADD('day',-30,CAST(CAST(DATE_TRUNC('DAY',CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP))",
     "  AND (from_iso8601_timestamp(cstudio_daily_analytics_v1.dt))<DATE_ADD('day',31,DATE_ADD('day',-30,CAST(CAST(DATE_TRUNC('DAY',CAST(NOW() AS TIMESTAMP)) AS DATE) AS TIMESTAMP)))",
-    "GROUP BY 1,2,3,4,5,6,7,8,9,10 ORDER BY 2 LIMIT 500",
+    "GROUP BY 1,2,3,4,5,6,7,8,9,10 ORDER BY 2 LIMIT 5000",
   ].join('\n');
 }
 
@@ -2461,7 +2474,7 @@ function buildQueueingSQL(campaignId) {
       "  AND (queue_creative_statistics.current_status) = 'excluded'",
       "  AND (pinpoint__creatives_simple.state) = 'enabled'",
       "  AND CAST(pinpoint__campaigns_creatives.campaign_id AS INT) = " + campaignId,
-      "LIMIT 500",
+      "LIMIT 5000",
     ].join('\n');
   } catch(e) { Logger.log('buildQueueingSQL failed: ' + e.message); return null; }
 }
@@ -2490,7 +2503,7 @@ function buildExploringSQL(campaignId) {
       "  AND (queue_creative_statistics.current_status) = 'included'",
       "  AND (pinpoint__creatives_simple.state) = 'enabled'",
       "  AND CAST(pinpoint__campaigns_creatives.campaign_id AS INT) = " + campaignId,
-      "LIMIT 500",
+      "LIMIT 5000",
     ].join('\n');
   } catch(e) { Logger.log('buildExploringSQL failed: ' + e.message); return null; }
 }
@@ -2518,7 +2531,7 @@ function buildOptimizingSQL(campaignId) {
       "  AND (queue_creative_statistics.is_currently_optimizing)",
       "  AND (pinpoint__creatives_simple.state) = 'enabled'",
       "  AND CAST(pinpoint__campaigns_creatives.campaign_id AS INT) = " + campaignId,
-      "LIMIT 500",
+      "LIMIT 5000",
     ].join('\n');
   } catch(e) { Logger.log('buildOptimizingSQL failed: ' + e.message); return null; }
 }
@@ -2813,7 +2826,7 @@ function buildImpressionInstallSQL(campaignId, lookbackDays) {
     "LEFT JOIN pinpoint__creatives_simple ON cstudio_daily_analytics_v1.creative_id = pinpoint__creatives_simple.id",
     "GROUP BY 1, 2",
     "ORDER BY 3 DESC",
-    "LIMIT 500",
+    "LIMIT 5000",
   ].join('\n');
 }
 
