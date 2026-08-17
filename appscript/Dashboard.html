@@ -277,9 +277,9 @@ header{padding-bottom:18px;border-bottom:1.5px solid var(--bd);margin-bottom:18p
   </header>
   <div id="updateBanner" style="background:linear-gradient(135deg,rgba(85,95,255,0.06),rgba(3,118,217,0.06));border:1.5px solid rgba(85,95,255,0.18);border-radius:12px;padding:12px 16px;margin-bottom:10px;position:relative">
     <button onclick="document.getElementById('updateBanner').style.display='none'" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:16px;color:var(--tx3);cursor:pointer;line-height:1">&times;</button>
-    <div style="font-size:12px;font-weight:600;color:var(--peri);margin-bottom:6px">&#128227; Page Update &mdash; July 09, 2026</div>
+    <div style="font-size:12px;font-weight:600;color:var(--peri);margin-bottom:6px">&#128227; Page Update &mdash; July 29, 2026</div>
     <div style="font-size:11px;color:var(--tx2);line-height:1.7">
-      <div style="margin-bottom:3px"><span style="font-weight:600;color:var(--slate)">Bug Fix:</span> Fixed bugs to align cross-regional calculations and AI summaries with the actual data.</div>
+      <div style="margin-bottom:3px"><span style="font-weight:600;color:var(--slate)">Latest update:</span> Every dollar figure and every share on this page &mdash; including the format table's SOW &mdash; is now <b>gross revenue</b> rather than media spend, and the format table, the format chart and the Video / Interactive splits all add up to the same campaign total; creatives sitting in the throttle queue or newly exploring now appear in the creative list, and the page shows the campaign summary while the performance data is still loading.</div>
       <div style="margin-bottom:3px"><span style="font-weight:600;color:var(--slate)">RPA metric:</span> This dashboard uses <b>first targeted event cohorted RPA</b> (Revenue Per Action based on the first target event within the attribution window).</div>
       <div style="margin-bottom:3px"><span style="font-weight:600;color:var(--slate)">Fully-baked data:</span> All metrics shown use fully matured cohort data (8-day bake period). Recent dates without complete data are excluded.</div>
       <div><span style="font-weight:600;color:var(--slate)">Recommended campaigns:</span> This tool is optimized for <b>CPR campaigns</b> and <b>CPA campaigns where the first targeted event attribution delay is within 7 days</b>. Campaigns with longer attribution windows may show incomplete RPA/ROAS data.</div>
@@ -2291,11 +2291,11 @@ function buildBdChart(title, dataMap, colorMap, chartType, ctx, sub){
   // Summary table
   var bdTblId='bdTbl-'+ctx;h+='<div class="tbl-wrap"><button class="copy-btn" data-act="copyTable" data-tbl="'+bdTblId+'">&#9112; Copy</button><table class="spend-tbl" id="'+bdTblId+'"><tr><th>Type</th><th>Spend</th><th>%</th><th>IPM</th><th>RPI</th><th>'+(isPrimRpa?'RPA':'D7 ROAS')+'</th></tr>';
   rows.forEach(function(row){
-    var pct=(row.spend/totalSpend*100).toFixed(1);
+    var pct=(row.money/totalSpend*100).toFixed(1);
     var rpiStr=row.rpiN>0?'$'+(row.rpiS/row.rpiN).toFixed(1):'—';
     var ipmStr=row.ipmN>0?(row.ipmS/row.ipmN).toFixed(2):'—';
     var perfStr=isPrimRpa?(row.rpaN>0?'$'+(row.rpaS/row.rpaN).toFixed(0):'—'):(row.roasN>0?(row.roasS/row.roasN*100).toFixed(1)+'%':'—');
-    h+='<tr><td>'+row.label+'</td><td class="mono">$'+Math.round(row.spend).toLocaleString()+'</td><td class="mono">'+pct+'%</td><td class="mono">'+ipmStr+'</td><td class="mono">'+rpiStr+'</td><td class="mono">'+perfStr+'</td></tr>';
+    h+='<tr><td>'+row.label+'</td><td class="mono">$'+Math.round(row.money).toLocaleString()+'</td><td class="mono">'+pct+'%</td><td class="mono">'+ipmStr+'</td><td class="mono">'+rpiStr+'</td><td class="mono">'+perfStr+'</td></tr>';
   });
   h+='</table>';
   // Legend dots
@@ -2567,7 +2567,7 @@ function renderMergedTable(){
       return n>0?s/n:null;
     }
     var av=grpVal(a),bv=grpVal(b);
-    if(av===null&&bv===null)return b.spend-a.spend;
+    if(av===null&&bv===null)return moneyOf(b)-moneyOf(a);
     if(av===null)return 1;if(bv===null)return -1;
     // Cost metrics sort inverted. Direction comes from METRICS (Code.js) — 'fresh' is a
     // column, not a metric, and is newest-first by the same logic.
@@ -2696,7 +2696,7 @@ function renderMergedTable(){
     if(!hasCr)cov='<span class="fc-st"><span class="dot" style="background:var(--rd)"></span><span style="color:var(--rd)">Missing</span></span>';
     else if(g.active>0)cov='<span class="fc-st"><span class="dot" style="background:var(--gn)"></span><span style="color:var(--gn)">'+g.active+' active'+(g.paused>0?', '+g.paused+' paused':'')+'</span></span>';
     else cov='<span class="fc-st"><span class="dot" style="background:var(--rd)"></span><span style="color:var(--rd)">'+g.paused+' paused</span></span>';
-    var fresh=!hasCr?'&mdash;':g.newestDays<=30?'<span style="color:var(--gn)">'+g.newestDays+'d</span>':g.newestDays<=60?'<span style="color:var(--am)">'+g.newestDays+'d</span>':'<span style="color:var(--rd)">'+g.newestDays+'d &#9888;</span>';    var sow=(g.spend/gSpend*100).toFixed(1);
+    var fresh=!hasCr?'&mdash;':g.newestDays<=30?'<span style="color:var(--gn)">'+g.newestDays+'d</span>':g.newestDays<=60?'<span style="color:var(--am)">'+g.newestDays+'d</span>':'<span style="color:var(--rd)">'+g.newestDays+'d &#9888;</span>';    var sow=(gSpend>0?(g.money/gSpend*100):0).toFixed(1);
     var sowBar=sow+'%';
     // Weighted ratio-of-sums aggregation (matches how campaign-level SQL aggregates):
     // ROAS = Σ(customer_rev)/Σ(rev) where customer_rev_i = roas_i × rev_i

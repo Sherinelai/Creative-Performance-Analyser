@@ -103,7 +103,26 @@ const REQUIRED = [
   ['kpiRow', 200],
   ['panel-overview', 2000],
 ];
+// A rendered "NaN" or "undefined" is a broken reference that still paints. The SOW column showed
+// NaN% for a week because `g.spend` had been renamed to `g.money` and one reference survived at the
+// tail of a 300-character line, past where every grep was truncated. Cheap to assert, invisible
+// otherwise.
+const NO_JUNK = ['kpiRow', 'panel-overview'];
+function assertNoJunk(label) {
+  NO_JUNK.forEach((id) => {
+    const html = (elements.get(id) || { innerHTML: '' }).innerHTML;
+    ['NaN', 'undefined', 'Infinity'].forEach((bad) => {
+      if (html.indexOf(bad) >= 0) {
+        const at = html.indexOf(bad);
+        throw new Error('#' + id + ' rendered "' + bad + '" (' + label + '): ...' +
+          html.slice(Math.max(0, at - 90), at + 40).replace(/\s+/g, ' ') + '...');
+      }
+    });
+  });
+}
+
 function assertRendered(label) {
+  assertNoJunk(label);
   // The headline money figure is gross revenue, not spend — a regression here is silent, because
   // both are plausible dollar amounts (78841: $92,972.86 vs $55,927.50).
   const kpi = (elements.get('kpiRow') || { innerHTML: '' }).innerHTML;

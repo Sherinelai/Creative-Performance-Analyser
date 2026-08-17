@@ -24,8 +24,8 @@ const ROWS = JSON.parse(fs.readFileSync('/tmp/rows_all.json', 'utf8'));
 // getQueuePDT() resolve and column-verify at runtime. These constants are only here so the SQL can
 // be BUILT offline; when a query suddenly says the table is gone, refresh them with
 //   SHOW TABLES FROM looker LIKE '%cstudio__creative_format%'
-const CREATIVE_FORMAT_PDT = 'looker.lr_rbd0d1785211467189_cstudio__creative_format';
-const QUEUE_PDT = 'looker.lr_rbec01785126641966_queue_creative_statistics';
+const CREATIVE_FORMAT_PDT = 'looker.lr_rbd0d1786942000571_cstudio__creative_format';
+const QUEUE_PDT = 'looker.lr_rbec01786941743823_queue_creative_statistics';
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'appscript', 'Code.js'), 'utf8');
 const logs = [];
