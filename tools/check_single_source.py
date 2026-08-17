@@ -47,6 +47,9 @@ FORBIDDEN: list[tuple[Path, str, str]] = [
      "queuing collapsed into exploring — the three creative states are mutually exclusive"),
     (DASH, r"is_queuing\s*\?\s*'Queuing'|!c\.is_queuing",
      "state read off the is_queuing flag — compare lifecycle_state === 'queuing' instead"),
+    (DASH, r"c\.is_video\b",
+     "video-ness read off is_video_creative — that flag contradicts the serving format at scale; "
+     "use isVideoFmt(c), which asks whether the MCO Inventory Group name is a VAST format"),
     (DASH, r"poorCidSet\[cid\]\s*=\s*true;?\s*$",
      "performance class recomputed client-side — read c.perf_class (server stamps it)"),
     (DASH, r"delete\s+poorCidSet\[",
@@ -69,6 +72,7 @@ COUNTS: list[tuple[Path, str, int, int, str]] = [
     (CODE, r"var MCO_RULES\s*=", 1, 1, "MCO rule-set definitions"),
     (CODE, r"var METRICS\s*=", 1, 1, "metric-definition tables"),
     (DASH, r"\.getConfig\(\)", 1, 1, "getConfig() fetches (the one channel for server config)"),
+    (DASH, r"function isVideoFmt\(", 1, 1, "video-classification definitions (VAST = Video)"),
 ]
 
 

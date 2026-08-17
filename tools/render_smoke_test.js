@@ -151,6 +151,31 @@ for (const type of ['cpr', 'cpa']) {
   }
 }
 
+// Video vs Non-video must be classified off the MCO Inventory Group name (VAST = Video), never
+// off is_video_creative. The demo fixtures carry no is_video field at all, so the old flag-based
+// rule filed every demo creative under Non-video — a degenerate chart that threw nothing and
+// looked plausible. Counts are pinned to the fixtures; update them if the fixtures change.
+errors.length = 0;
+try {
+  vm.runInContext(`
+    var _expect = {cpr: {Video: 11, 'Non-video': 7}, cpa: {Video: 9, 'Non-video': 6}};
+    Object.keys(_expect).forEach(function(t) {
+      loadDummy(t);
+      var vmap = aggregateBreakdown().videoMap;
+      Object.keys(_expect[t]).forEach(function(bucket) {
+        var got = vmap[bucket] ? vmap[bucket].count : 0;
+        if (got !== _expect[t][bucket])
+          throw new Error(t + ' ' + bucket + ': ' + got + ' creatives, expected ' + _expect[t][bucket]);
+      });
+    });
+  `, ctx);
+  if (errors.length) throw new Error(errors.join('\n'));
+  console.log('PASS  Video vs Non-video split follows the format name');
+} catch (e) {
+  failed = true;
+  console.error(`FAIL  Video vs Non-video split:\n${e.stack || e}\n`);
+}
+
 // The overview pass: what the page renders BEFORE the performance query lands. Nothing that reads
 // creativePerf may throw when it is empty, and the perf-dependent modules must be replaced by the
 // pending card rather than drawing an empty chart.

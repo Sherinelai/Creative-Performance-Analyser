@@ -477,6 +477,29 @@ function invToDN(inv){
   return MCO_GROUP_MAP[base]||inv;
 }
 
+/**
+ * isVideoFmt: the ONE definition of video-ness for the whole dashboard — the creative's MCO
+ * Inventory Group name. A VAST format is Video; everything else (HTML, Banner, Static) is not.
+ *
+ * It is deliberately NOT analytics.daily_attr_event_d7's is_video_creative flag, which the
+ * dashboard used to read. That flag disagrees with the serving format at scale — measured over
+ * one baked day: ~3,900 creatives carrying $200K+ of spend sat on VAST formats with
+ * is_video_creative='false', a few hundred non-VAST creatives had 'true', and some rows carry a
+ * third value, 'UNMATCHED', which fell into Non-video. It is also unstable per creative: is_video
+ * is one of the 17 perf GROUP BY dimensions, so a creative whose flag moved mid-window keeps
+ * whichever value combinePerfChunks_ happened to collapse first (38 of 91,634 creatives in a day).
+ * The format name is what "Creative Performance by Format" already groups on, so the two sections
+ * can never disagree.
+ *
+ * Group names come from MCO_GROUP_MAP (via getConfig()). Before that returns, invToDN falls back to
+ * the raw inventory_format — which still says "vast" for every VAST format except native-video,
+ * which is why that one base is matched explicitly.
+ */
+function isVideoFmt(c){
+  var dn=String((c&&(c.mco_group||invToDN(c.competing_group)))||'');
+  return /vast/i.test(dn)||/^native-video/i.test(dn);
+}
+
 /* ─── multi-select ─── */
 function initMS(){
   var c=document.getElementById('msOptions');if(!c)return;c.innerHTML='';
@@ -2194,7 +2217,7 @@ function aggregateBreakdown(){
     if(c.iti!=null){m.sItiS+=c.iti;m.sItiN++;if(c.impressions>0){m.instD7S+=c.iti*c.impressions;m.impS+=c.impressions;}}
   }
   perfs.forEach(function(c){
-    acc(videoMap,String(c.is_video)==='true'?'Video':'Non-video',c);
+    acc(videoMap,isVideoFmt(c)?'Video':'Non-video',c);
     acc(interMap,c.is_interactive||'N/A',c);
   });
   // Expose weighted values in the shape buildBdChart expects (S/N pairs)
@@ -2216,13 +2239,13 @@ function aggregateBreakdown(){
   return {videoMap:videoMap,interMap:interMap};
 }
 
-function buildBdChart(title, dataMap, colorMap, chartType, ctx){
+function buildBdChart(title, dataMap, colorMap, chartType, ctx, sub){
   var rows=Object.values(dataMap).sort(function(a,b){return b.money-a.money;});
   var totalSpend=rows.reduce(function(s,r){return s+r.money;},0)||1;
   var isPrimRpa=R&&R._isCpa;
   var h='<div class="bd-chart">';
   h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-  h+='<div class="bd-title">'+title+'</div>';
+  h+='<div class="bd-title">'+title+(sub?' <span style="font-weight:500;font-size:var(--f7);color:var(--tx3)">'+sub+'</span>':'')+'</div>';
   h+='<div class="ctoggle"><button data-act="setBdChart" data-val="bar" data-ctx="'+ctx+'"'+(chartType==='bar'?' class="active"':'')+'>Bar</button><button data-act="setBdChart" data-val="donut" data-ctx="'+ctx+'"'+(chartType==='donut'?' class="active"':'')+'>Donut</button></div>';
   h+='</div>';
   if(chartType==='donut'){
@@ -2302,7 +2325,7 @@ function buildBreakdownInner(agg){
   agg=agg||aggregateBreakdown();
   var vColors={'Video':C_VIDEO,'Non-video':C_NON_VIDEO};
   var iColors={'Interactive':C_INTERACTIVE,'Not Interactive':C_NOT_INTERACTIVE,'N/A':'#95A2BC'};
-  return buildBdChart('Video vs Non-video',agg.videoMap,vColors,_bdChart['video']||'bar','video')+
+  return buildBdChart('Video vs Non-video',agg.videoMap,vColors,_bdChart['video']||'bar','video','&middot; VAST formats count as Video')+
          buildBdChart('Interactive vs Not Interactive',agg.interMap,iColors,_bdChart['inter']||'bar','inter');
 }
 
@@ -2506,7 +2529,7 @@ function renderMergedTable(){
       if(_tblFilter.pipeline==='optimizing'&&c.lifecycle_state!=='optimizing')return false;
     }
     if(_tblFilter.adType){
-      if(_tblFilter.adType==='video'&&String(c.is_video)!=='true')return false;
+      if(_tblFilter.adType==='video'&&!isVideoFmt(c))return false;
       if(_tblFilter.adType==='interactive'&&c.is_interactive!=='Interactive')return false;
     }
     return true;
@@ -2784,7 +2807,7 @@ function renderMergedTable(){
       // Video / Interactive tags (hidden by default, togglable)
       var viTags='';
       if(!hc['vi_tags']){
-        if(String(c.is_video)==='true')viTags+='<span class="tag tag-v">Video</span> ';
+        if(isVideoFmt(c))viTags+='<span class="tag tag-v">Video</span> ';
         if(c.is_interactive==='Interactive')viTags+='<span class="tag tag-v">Interactive</span> ';
       }
       // Performance tags — MUST match filter sets exactly (topCidSet, campAvgCidSet, fmtAvgCidSet, poorCidSet)

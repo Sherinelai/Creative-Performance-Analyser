@@ -131,6 +131,33 @@ prompt (`mcoRulesPromptBlock()` appends it as authoritative), the client-side of
 (`localMcoDiagnosis` reads `mcoRules()` and bails out with `insufficient_data` if config hasn't
 arrived), and any server-side logic. Changing a threshold is a one-line edit.
 
+## Video vs Non-video — a function of the format name, never of `is_video_creative`
+
+`isVideoFmt(c)` in `Dashboard.html` is the one definition: a creative is **Video iff its MCO
+Inventory Group name is a VAST format** — the same group name the "Creative Performance by Format"
+table rows on, so the two sections cannot disagree. `native-video` maps to `Native VAST` and counts as
+video; HTML interstitials, banners, `native-static` and `mrect` do not. All three surfaces call it —
+the Video vs Non-video chart/table/prose, the creative table's **Video** quick-filter, and the
+per-creative **Video** tag.
+
+`analytics.daily_attr_event_d7.is_video_creative`, which those surfaces used to read, is **not
+trusted**. Measured over one baked day (2026-08-17):
+
+- ~3,900 creatives carrying $200K+ of spend sat on VAST formats with the flag `'false'`; a few
+  hundred non-VAST creatives had `'true'`; some rows carry a third value, `'UNMATCHED'`, which the
+  old ternary silently filed under Non-video.
+- Per campaign the gap is decisive, not marginal: **82323** — 40 of 80 creatives on VAST formats,
+  flag says **0** are video. **38469** — 10 VAST creatives, flag says 1.
+- The flag is also unstable *per creative*: 38 of 91,634 creatives carried two different values
+  inside a single day, and because `is_video` is one of the 17 perf `GROUP BY` dimensions, the
+  surviving row keeps whichever value `combinePerfChunks_` collapsed first.
+
+`check_single_source.py` fails on any `c.is_video` read in `Dashboard.html`, and
+`render_smoke_test.js` pins the demo split (cpr 11/7, cpa 9/6) — the demo fixtures carry no
+`is_video` field at all, so the old rule filed *every* demo creative under Non-video and drew a
+plausible-looking chart that was entirely wrong. The field still flows from the server; nothing
+renders from it.
+
 ## Creative state — three states, read from the queue PDT
 
 **Authoritative, never derived.** `MCO_RULES.creative_states` holds the definition; the three SQL
