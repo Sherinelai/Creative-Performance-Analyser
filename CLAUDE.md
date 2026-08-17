@@ -24,6 +24,12 @@
 - `tools/sync_skill.py` — compiles that `.md` into `Code.js`'s `MCO_SKILL` (`--check` to verify)
 - `tools/check_single_source.py` — fails if duplicated knowledge reappears
 - `tools/render_smoke_test.js` — runs `Dashboard.html`'s render chain in Node behind a DOM stub
+- `HANDOVER.md` + `tools/docs_auth.py` / `tools/docs_write.py` — **the fifth thing**, added
+  deliberately: the team-facing handover document (English + 繁中, both audiences) and the two
+  scripts that publish it. `docs_auth.py` mints a Docs-scoped OAuth token once
+  (`auth/docs-token.json`, gitignored); `docs_write.py <docId> <file.md>` replaces that Doc's body
+  from a Markdown subset. The live copy is Doc `1ti7Imv3OUo8oeop7H8osaT_j5q2vjej3ZCEyYXQjCP4`.
+  **Edit `HANDOVER.md` and re-run the writer** — do not hand-edit the Doc, or the two diverge.
 - `auth/` — `looker.ini` + Google tokens/service account (all **gitignored**, never commit)
 - `LEARNINGS.d/` — per-session learnings log (each session appends to its OWN `<session-id>.md`)
 - `logs/mcp_queries.jsonl` — local query log (gitignored)
@@ -50,9 +56,11 @@ summarizeFormatTrends(data)   one Claude call for the format charts
 logUsage(action, details)     appends a row to the 'Usage Log' sheet (1URHDL…)
 ```
 
-`fetchCreativeData` (`Code.js:683`) is the whole pipeline: search campaign → **Batch 1** → merge →
-filter → optional daily-metrics backfill → `analyzeCreativePerformance` → **Batch 2** → recommendations
-→ one big result object the front end renders.
+`fetchCreativeData` is the whole pipeline: search campaign → **wave 1** (perf) → **wave 2**
+(everything else) → merge → filter → optional daily-metrics backfill → `analyzeCreativePerformance`
+→ recommendations → one big result object the front end renders. `fetchCampaignOverview` is the same
+function with `overviewOnly`, which skips perf and the three chart queries so the page can paint in
+~8s and fill in the numbers on a second call.
 
 ## Data layer — Looker SQL Runner over Trino
 
@@ -62,18 +70,26 @@ filter → optional daily-metrics backfill → `analyzeCreativePerformance` → 
 `runSQLParallel(sqlMap)` (`Code.js:192`) is the app's central performance trick and the thing most
 worth preserving in any rewrite: slugs are created **sequentially** (each needs auth), then every
 `/run/json` fires at once through `UrlFetchApp.fetchAll()`. A failed key degrades to `[]`, never
-throws. The two batches:
+throws. The waves:
 
-**All 13 queries go in ONE batch** — `perf`, `inventory`, `config`, `dailyFmt`, `typeBreak`, `meta`,
-`dailyCr`, `targetEvt`, `pauseLog`, `impInst`, `queuing`, `exploring`, `optimizing`. It used to be two,
-and the second was a pure barrier: every query in it needs only `campaignId` + `lookbackDays`, both
-known before the first batch, so it waited for nothing. Measured on campaign 77022 — perf **40s**,
-dailyFmt **28s**, dailyCr **26s**, everything else 4–8s — the barrier alone cost ~28s of a ~68s load.
-**Do not reintroduce a second batch unless a query's SQL genuinely needs another query's rows.**
+**Wave 1 is `perf` ALONE; wave 2 is every other query in parallel.** Once they all went in one batch
+— the barrier between the old Batch 1 and Batch 2 waited for nothing and cost ~28s of a ~68s load on
+campaign 77022 (perf **40s**, dailyFmt **28s**, dailyCr **26s**, everything else 4–8s). Perf then got
+its own wave for a different reason: it is the slowest and least predictable query (40s, 94s, once
+>120s on the same campaign in one day) and running it alongside the other twelve made it compete for
+the connection and lose. Wave 2 is `inventory`, `config`, `meta`, `targetEvt`, `pauseLog`,
+`unassigned`, `deviceTgt`, `impInst`, `queuing`, `exploring`, `optimizing`, plus `dailyFmt`,
+`dailyCr`, `typeBreak` on the full pass. **Do not put a barrier between them, and do not add a third
+wave, unless a query's SQL genuinely needs another query's rows.**
+
+Perf is also **chunked** for lookbacks ≥15 days (`perfChunkWindows_`: ~10-day windows, max 6) and the
+chunks go **one at a time** — `fetchAll` lost chunks 1 and 2 twice on campaign 73853 while the same
+three answer in 14–19s each from outside GAS. One retry, then a missing chunk becomes an **error**:
+sums covering fewer days than the window claims are worse than no answer.
 
 Two other measured facts about load time: every query has a **~4–5s floor** regardless of size (Looker
 SQL Runner round trip + Trino planning — a 2-row query takes 4.2s), and slug creation is still
-**sequential**, so 13 round trips precede any execution. Unscoped CTEs are *not* a problem: the
+**sequential**, so one round trip per query precedes any execution. Unscoped CTEs are *not* a problem: the
 `creative_state_events` aggregation over 1.58M rows costs 6.3s versus 5.0s scoped to one campaign.
 
 `queuing`/`exploring`/`optimizing` fall back to `'SELECT 1 AS _skip'` when their builder returns null.
